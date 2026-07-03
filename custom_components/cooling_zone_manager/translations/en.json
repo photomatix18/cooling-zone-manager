@@ -1,0 +1,31 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Cooling Zone Manager",
+        "description": "Global settings. You can change both of these later from the Max zones and Overlap time entities this integration creates.",
+        "data": {
+          "name": "Name",
+          "max_zones": "Maximum zones cooling at the same time",
+          "overlap_seconds": "Overlap / wind-down time (seconds)"
+        }
+      },
+      "zone": {
+        "title": "Add a cooling zone",
+        "description": "Zones added so far: {zone_count}. Each zone needs the entity that signals cooling demand (the request) and the entity that actually runs the cooling.",
+        "data": {
+          "name": "Zone name (e.g. bedrooms)",
+          "request_entity": "Request entity (the demand signal, read-only)",
+          "switch_entity": "Cooling switch (what gets turned on and off)",
+          "add_another": "Add another zone after this one"
+        }
+      }
+    },
+    "error": {
+      "empty_name": "Please enter a zone name.",
+      "duplicate_name": "A zone with this name was already added.",
+      "duplicate_switch": "This cooling switch is already used by another zone.",
+      "same_entity": "The request entity and the cooling switch must be different entities."
+    }
+  }
+}

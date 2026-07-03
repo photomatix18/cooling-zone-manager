@@ -1,0 +1,13 @@
+{
+  "domain": "cooling_zone_manager",
+  "name": "Cooling Zone Manager",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/YOUR-GITHUB-USERNAME/cooling-zone-manager",
+  "integration_type": "hub",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/YOUR-GITHUB-USERNAME/cooling-zone-manager/issues",
+  "requirements": [],
+  "version": "1.0.0"
+}
