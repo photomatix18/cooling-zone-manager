@@ -2,6 +2,16 @@
 
 All notable changes to the Cooling Zone Manager integration are documented here.
 
+## 1.4.1 — 2026-07-03
+
+### Added
+
+- **Integration icon.** A "zoned house" icon now ships with the integration
+  (in its `brand/` folder) and appears in the Home Assistant UI — Settings →
+  Devices & Services, config dialogs, and HACS — on Home Assistant 2026.3 or
+  newer, which serves local brand images automatically. On older versions
+  the icon simply doesn't show; nothing else changes.
+
 ## 1.4.0 — 2026-07-03
 
 ### Added
