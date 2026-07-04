@@ -11,14 +11,14 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_ADD_ANOTHER,
-    CONF_MAX_RUN,
+    CONF_MAX_RUN_MINUTES,
     CONF_MAX_ZONES,
     CONF_OVERLAP,
     CONF_REQUEST_ENTITY,
     CONF_SWITCH_ENTITY,
     CONF_ZONE_NAME,
     CONF_ZONES,
-    DEFAULT_MAX_RUN,
+    DEFAULT_MAX_RUN_MINUTES,
     DEFAULT_MAX_ZONES,
     DEFAULT_NAME,
     DEFAULT_OVERLAP,
@@ -68,14 +68,14 @@ class CoolingZoneManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
                 ),
                 vol.Required(
-                    CONF_MAX_RUN, default=DEFAULT_MAX_RUN
+                    CONF_MAX_RUN_MINUTES, default=DEFAULT_MAX_RUN_MINUTES
                 ): selector.NumberSelector(
                     selector.NumberSelectorConfig(
                         min=0,
-                        max=28800,
+                        max=480,
                         step=1,
                         mode=selector.NumberSelectorMode.BOX,
-                        unit_of_measurement="s",
+                        unit_of_measurement="min",
                     )
                 ),
             }
@@ -118,8 +118,10 @@ class CoolingZoneManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_ZONES: self._zones,
                         CONF_MAX_ZONES: int(self._settings[CONF_MAX_ZONES]),
                         CONF_OVERLAP: int(self._settings[CONF_OVERLAP]),
-                        CONF_MAX_RUN: int(
-                            self._settings.get(CONF_MAX_RUN, DEFAULT_MAX_RUN)
+                        CONF_MAX_RUN_MINUTES: int(
+                            self._settings.get(
+                                CONF_MAX_RUN_MINUTES, DEFAULT_MAX_RUN_MINUTES
+                            )
                         ),
                     },
                 )

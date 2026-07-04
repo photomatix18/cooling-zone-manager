@@ -104,15 +104,13 @@ class ZoneStatusSensor(_ManagerSensor):
                     "status": manager.zone_status(zone.name),
                     "requesting": manager.zone_requesting(zone.name),
                     "cooling": manager.zone_cooling(zone.name),
-                    "current_run_seconds": round(
-                        manager.zone_current_run(zone.name)
-                    ),
-                    "total_runtime_seconds": round(
-                        manager.zone_runtime(zone.name)
+                    "cycle_runtime_seconds": round(
+                        manager.zone_cycle_runtime(zone.name)
                     ),
                 }
                 for zone in manager.zones
             },
+            "session_runtime_seconds": round(manager.session_runtime),
             "version": manager.version,
         }
 
@@ -153,57 +151,66 @@ class ZoneDetailSensor(_ManagerSensor):
             "cooling_on": manager.zone_cooling(name),
             "preempted": name in manager.preempted_zones,
             "started_at": started.isoformat() if started else None,
-            "current_run_seconds": round(manager.zone_current_run(name)),
-            "total_runtime_seconds": round(manager.zone_runtime(name)),
+            "cycle_runtime_seconds": round(manager.zone_cycle_runtime(name)),
+            "last_cycle_seconds": round(manager.zone_last_cycle(name)),
             "round_robin_position": rr.index(name) + 1 if name in rr else None,
         }
 
 
 class _RuntimeSensor(_ManagerSensor):
-    """Base for the accumulating runtime sensors."""
+    """Base for the cycle/session runtime sensors."""
 
     # Event-driven updates plus polling, so the value keeps ticking while
-    # a zone runs. Statistics-friendly: works with utility_meter helpers
-    # for daily/weekly runtime.
+    # a zone runs. These are measurements, not lifetime totals: the zone
+    # sensors reset when a run starts, the session sensor when a new
+    # cooling session begins.
     _attr_should_poll = True
     _attr_device_class = SensorDeviceClass.DURATION
-    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = UnitOfTime.SECONDS
-    _attr_suggested_unit_of_measurement = UnitOfTime.HOURS
-    _attr_suggested_display_precision = 2
+    _attr_suggested_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_suggested_display_precision = 1
     _attr_icon = "mdi:timer-outline"
 
 
 class ZoneRuntimeSensor(_RuntimeSensor):
-    """Total time one zone has spent cooling."""
+    """How long one zone's current run has been cooling.
+
+    Resets to zero when the zone starts a run; while the zone is off it
+    holds the duration of the last completed run.
+    """
 
     def __init__(
         self, manager: CoolingZoneManager, entry: ConfigEntry, zone_name: str
     ) -> None:
         super().__init__(manager, entry)
         self._zone_name = zone_name
-        self._attr_name = f"{zone_name} runtime"
+        self._attr_name = f"{zone_name} cycle runtime"
         self._attr_unique_id = f"{entry.entry_id}_zone_{zone_name}_runtime"
 
     @property
     def native_value(self) -> int:
-        return round(self._manager.zone_runtime(self._zone_name))
+        return round(self._manager.zone_cycle_runtime(self._zone_name))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        started = self._manager.zone_started_at(self._zone_name)
+        manager = self._manager
+        started = manager.zone_started_at(self._zone_name)
         return {
+            "running": started is not None,
             "started_at": started.isoformat() if started else None,
-            "current_run_seconds": round(
-                self._manager.zone_current_run(self._zone_name)
-            ),
+            "last_cycle_seconds": round(manager.zone_last_cycle(self._zone_name)),
         }
 
 
 class TotalRuntimeSensor(_RuntimeSensor):
-    """Total time all zones combined have spent cooling."""
+    """Cooling time across all zones in the current session.
 
-    _attr_name = "Total runtime"
+    Resets to zero when a zone requests again after every zone was
+    satisfied and switched off.
+    """
+
+    _attr_name = "Session runtime"
     _attr_icon = "mdi:timer"
 
     def __init__(self, manager: CoolingZoneManager, entry: ConfigEntry) -> None:
@@ -212,16 +219,16 @@ class TotalRuntimeSensor(_RuntimeSensor):
 
     @property
     def native_value(self) -> int:
-        return round(self._manager.total_runtime)
+        return round(self._manager.session_runtime)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         manager = self._manager
-        since = manager.runtime_since
+        since = manager.session_started
         return {
-            "tracking_since": since.isoformat() if since else None,
-            "per_zone_seconds": {
-                zone.name: round(manager.zone_runtime(zone.name))
+            "session_started": since.isoformat() if since else None,
+            "per_zone_cycle_seconds": {
+                zone.name: round(manager.zone_cycle_runtime(zone.name))
                 for zone in manager.zones
             },
         }

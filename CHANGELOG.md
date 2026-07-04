@@ -2,6 +2,26 @@
 
 All notable changes to the Cooling Zone Manager integration are documented here.
 
+## 1.2.0 — 2026-07-03
+
+### Changed
+
+- **Runtime sensors are now cycle-based** instead of lifetime totals:
+  - Each zone's runtime sensor (now named *cycle runtime*) shows how long the
+    zone's **current run** has been cooling. It resets to zero the moment the
+    zone starts a run, and holds the last run's duration while the zone is off
+    (a `running` attribute tells you which you're looking at).
+  - The total sensor (now named *Session runtime*) accumulates cooling time
+    across all zones for the **current cooling session**. Once every zone is
+    satisfied and switched off, the next request resets it to zero and starts
+    a new session (a `session_started` attribute shows when).
+  - Because these values reset, the sensors' state class changed from
+    `total_increasing` to `measurement`. If you had created statistics or
+    utility meters on the 1.1.0 sensors, remove or re-create them.
+- **Max zone run time is now set in minutes** (config flow and number
+  entity). A value stored in seconds by 1.1.0 is converted automatically on
+  upgrade — no action needed.
+
 ## 1.1.0 — 2026-07-03
 
 ### Added

@@ -8,10 +8,10 @@ from homeassistant.loader import async_get_integration
 
 from .const import (
     CONF_MAX_RUN,
+    CONF_MAX_RUN_MINUTES,
     CONF_MAX_ZONES,
     CONF_OVERLAP,
     CONF_ZONES,
-    DEFAULT_MAX_RUN,
     DEFAULT_MAX_ZONES,
     DEFAULT_OVERLAP,
     DOMAIN,
@@ -24,13 +24,18 @@ PLATFORMS = [Platform.NUMBER, Platform.SENSOR]
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Cooling Zone Manager from a config entry."""
     zones = [Zone(**zone) for zone in entry.data[CONF_ZONES]]
+    if CONF_MAX_RUN_MINUTES in entry.data:
+        max_run_seconds = int(entry.data[CONF_MAX_RUN_MINUTES]) * 60
+    else:
+        # Entries created by 1.1.0 stored this in seconds.
+        max_run_seconds = int(entry.data.get(CONF_MAX_RUN, 0))
     manager = CoolingZoneManager(
         hass,
         entry.entry_id,
         zones,
         int(entry.data.get(CONF_MAX_ZONES, DEFAULT_MAX_ZONES)),
         int(entry.data.get(CONF_OVERLAP, DEFAULT_OVERLAP)),
-        int(entry.data.get(CONF_MAX_RUN, DEFAULT_MAX_RUN)),
+        max_run_seconds,
     )
     integration = await async_get_integration(hass, DOMAIN)
     manager.version = str(integration.version)

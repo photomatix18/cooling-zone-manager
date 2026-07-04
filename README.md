@@ -10,7 +10,7 @@ A custom Home Assistant integration that lets **at most N cooling zones run at t
 - If the old zone's request comes back during the overlap, it just keeps running — no short-cycling.
 - If a zone has been cooling longer than the **max zone run time** while other zones are waiting, it gets rotated out (same smooth handoff) and goes to the back of the queue — one stubborn zone can't hog the capacity. Set it to `0` to disable.
 - Lowering **Max zones** trims the oldest-running zones immediately.
-- Every zone's **runtime is tracked** (per zone and total, surviving restarts) so you can see which zones work hardest.
+- **Runtime is tracked** per cycle: each zone shows how long its current run has been cooling, and a session total accumulates across zones until everything is satisfied — then the next request starts a fresh session. Survives restarts.
 - The manager re-derives everything from live entity states, so it self-heals after Home Assistant restarts, reloads, or manual switch flips. (A zone switched on by hand with no request will be wound down after the overlap time.)
 
 ## Entities it creates
@@ -21,17 +21,17 @@ One device ("Cooling Zone Manager") showing the installed **version**, with thes
 |---|---|
 | `number.cooling_zone_manager_max_zones` | Max zones allowed at once — change it any time |
 | `number.cooling_zone_manager_overlap_time` | Overlap / wind-down time in seconds |
-| `number.cooling_zone_manager_max_zone_run_time` | Longest a zone may cool while others wait, in seconds (`0` = no limit) |
+| `number.cooling_zone_manager_max_zone_run_time` | Longest a zone may cool while others wait, in minutes (`0` = no limit) |
 | `sensor.cooling_zone_manager_active_zones` | How many zones are cooling now; attributes show active / requesting / winding-down / waiting / preempted zones, the round-robin order, a per-zone detail map, and the version |
-| `sensor.cooling_zone_manager_<zone>_status` | One per zone: `cooling`, `winding_down`, `waiting`, or `idle`, with the request state, actual switch state, current run duration, and total runtime as attributes |
-| `sensor.cooling_zone_manager_<zone>_runtime` | One per zone: total time the zone has spent cooling |
-| `sensor.cooling_zone_manager_total_runtime` | Total cooling time across all zones, with a per-zone breakdown attribute |
+| `sensor.cooling_zone_manager_<zone>_status` | One per zone: `cooling`, `winding_down`, `waiting`, or `idle`, with the request state, actual switch state, and cycle runtime as attributes |
+| `sensor.cooling_zone_manager_<zone>_runtime` | One per zone: how long the **current run** has been cooling. Resets when the zone starts; holds the last run's duration while off (`running` attribute says which) |
+| `sensor.cooling_zone_manager_total_runtime` | Cooling time across all zones for the **current session**. Resets when a zone requests again after everything was satisfied |
 
-The numbers remember their values across restarts, so they replace the old `input_number` helpers. The runtime sensors persist across restarts too, and are statistics-friendly — point a [utility meter helper](https://www.home-assistant.io/integrations/utility_meter/) at them for daily/weekly/monthly runtime.
+The numbers remember their values across restarts, so they replace the old `input_number` helpers. The runtime tracking persists across restarts too.
 
 ## Max zone run time (fairness limit)
 
-Sometimes one zone can't reach its setpoint — an oversized room, a heat wave, a wide-open door — and would otherwise occupy a cooling slot forever while other zones wait. When **Max zone run time** is set (e.g. `3600` = 1 hour):
+Sometimes one zone can't reach its setpoint — an oversized room, a heat wave, a wide-open door — and would otherwise occupy a cooling slot forever while other zones wait. When **Max zone run time** is set (in minutes, e.g. `60` = 1 hour):
 
 - A zone that has been cooling that long **while at least one other zone is waiting** is wound down with the normal overlap handoff, and the waiting zone starts immediately.
 - The rotated-out zone goes to the back of the round-robin queue. Its request is still on, so it re-enters the rotation and gets another turn when capacity frees up.
@@ -86,7 +86,7 @@ HACS installs integrations from GitHub repositories, so this repo needs to live 
 ## Configuration
 
 1. Go to **Settings → Devices & Services → + Add Integration** and search for **Cooling Zone Manager**.
-2. First screen: pick a name, the max zones (e.g. `2`), overlap seconds (e.g. `15`), and max zone run time (e.g. `3600` for 1 hour, or `0` for no limit).
+2. First screen: pick a name, the max zones (e.g. `2`), overlap seconds (e.g. `15`), and max zone run time in minutes (e.g. `60` for 1 hour, or `0` for no limit).
 3. Then add each zone one at a time. Example for a three-zone setup:
 
    | Zone name | Request entity | Cooling switch |

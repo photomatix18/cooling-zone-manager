@@ -54,8 +54,13 @@ class _ManagerNumber(RestoreNumber):
         await super().async_added_to_hass()
         data = await self.async_get_last_number_data()
         if data is not None and data.native_value is not None:
-            self._attr_native_value = data.native_value
-            self._push(data.native_value)
+            value = self._convert_restored(data)
+            self._attr_native_value = value
+            self._push(value)
+
+    def _convert_restored(self, data) -> float:
+        """Hook for entities whose unit changed between versions."""
+        return data.native_value
 
     async def async_set_native_value(self, value: float) -> None:
         """Handle a change from the UI."""
@@ -103,19 +108,28 @@ class OverlapNumber(_ManagerNumber):
 
 
 class MaxRunNumber(_ManagerNumber):
-    """Longest a zone may cool while other zones wait. 0 disables it."""
+    """Longest a zone may cool while other zones wait. 0 disables it.
+
+    Set in minutes; the manager keeps seconds internally.
+    """
 
     _attr_name = "Max zone run time"
     _attr_icon = "mdi:timer-alert-outline"
     _attr_native_min_value = 0
-    _attr_native_max_value = 28800
+    _attr_native_max_value = 480
     _attr_native_step = 1
-    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
 
     def __init__(self, manager: CoolingZoneManager, entry: ConfigEntry) -> None:
         super().__init__(manager, entry)
         self._attr_unique_id = f"{entry.entry_id}_max_run"
-        self._attr_native_value = manager.max_run
+        self._attr_native_value = manager.max_run // 60
+
+    def _convert_restored(self, data) -> float:
+        # 1.1.0 stored this value in seconds.
+        if data.native_unit_of_measurement == UnitOfTime.SECONDS:
+            return round(data.native_value / 60)
+        return data.native_value
 
     def _push(self, value: float) -> None:
-        self._manager.max_run = int(value)
+        self._manager.max_run = int(value) * 60

@@ -8,7 +8,7 @@
           "name": "Name",
           "max_zones": "Maximum zones cooling at the same time",
           "overlap_seconds": "Overlap / wind-down time (seconds)",
-          "max_run_seconds": "Max zone run time in seconds, 0 = no limit (a zone running this long is rotated out if other zones are waiting)"
+          "max_run_minutes": "Max zone run time in minutes, 0 = no limit (a zone running this long is rotated out if other zones are waiting)"
         }
       },
       "zone": {

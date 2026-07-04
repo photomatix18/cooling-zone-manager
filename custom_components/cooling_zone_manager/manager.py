@@ -18,8 +18,9 @@ Same behavior as the YAML v2 automation, implemented natively:
 * Everything is re-derived from live entity states on every pass, so the
   manager self-heals after restarts, reloads, or manual switch changes.
 
-The manager also tracks cumulative runtime per zone (persisted across
-restarts) so the sensor platform can expose per-zone and total runtimes.
+The manager also tracks each zone's current cycle runtime (reset when the
+zone starts a run) and the total for the current cooling session (reset when
+demand returns after every zone was satisfied), persisted across restarts.
 """
 from __future__ import annotations
 
@@ -82,12 +83,17 @@ class CoolingZoneManager:
         self._preempted: set[str] = set()
         # zone name -> (fire-at epoch, cancel) for its max-run timer
         self._maxrun_timers: dict[str, tuple[float, CALLBACK_TYPE]] = {}
-        # Runtime bookkeeping: when each running zone started (epoch) and
-        # the accumulated seconds of completed runs.
+        # Runtime bookkeeping: when each running zone started (epoch), how
+        # long each zone's last completed run took, and the completed-run
+        # seconds of the current cooling session.
         self._started: dict[str, float] = {}
-        self._runtime: dict[str, float] = {}
+        self._last_cycle: dict[str, float] = {}
+        self._session_runtime = 0.0
+        self._session_started: float | None = None
+        # True once every zone is satisfied and switched off; the next
+        # request after that starts a fresh session.
+        self._idle = False
         self._restored_started: dict[str, float] = {}
-        self._runtime_since: float | None = None
         self._dirty = False
         self._lock = asyncio.Lock()
         self._unsub_state: CALLBACK_TYPE | None = None
@@ -107,10 +113,10 @@ class CoolingZoneManager:
                 # Self-healing: any zone missing from the saved order is
                 # appended.
                 self._rr = saved + [name for name in self._rr if name not in saved]
-            if isinstance(data.get("runtime"), dict):
-                self._runtime = {
+            if isinstance(data.get("last_cycle"), dict):
+                self._last_cycle = {
                     name: float(value)
-                    for name, value in data["runtime"].items()
+                    for name, value in data["last_cycle"].items()
                     if name in known
                 }
             if isinstance(data.get("started"), dict):
@@ -121,8 +127,11 @@ class CoolingZoneManager:
                     for name, value in data["started"].items()
                     if name in known
                 }
-            if data.get("runtime_since") is not None:
-                self._runtime_since = float(data["runtime_since"])
+            if data.get("session_runtime") is not None:
+                self._session_runtime = float(data["session_runtime"])
+            if data.get("session_started") is not None:
+                self._session_started = float(data["session_started"])
+            self._idle = bool(data.get("idle", False))
 
         entities: list[str] = []
         for zone in self.zones:
@@ -155,14 +164,8 @@ class CoolingZoneManager:
             cancel()
         self._maxrun_timers.clear()
 
-        # Bank the in-progress runs and move their start marker to now, so
-        # a reload / restart neither loses nor double-counts runtime.
-        now = dt_util.utcnow().timestamp()
-        for name, start in list(self._started.items()):
-            self._runtime[name] = self._runtime.get(name, 0.0) + max(
-                0.0, now - start
-            )
-            self._started[name] = now
+        # Runs in progress keep their original start marker: on reload the
+        # cycle continues from its true start, nothing double-counts.
         await self._save_state()
 
     # ------------------------------------------------------------ listeners
@@ -254,21 +257,38 @@ class CoolingZoneManager:
             return 0.0
         return max(0.0, dt_util.utcnow().timestamp() - start)
 
-    def zone_runtime(self, name: str) -> float:
-        """Total seconds the zone has cooled, including the current run."""
-        return self._runtime.get(name, 0.0) + self.zone_current_run(name)
+    def zone_cycle_runtime(self, name: str) -> float:
+        """Seconds of the zone's current run, or of its last completed run.
+
+        Resets to zero the moment the zone starts a new run.
+        """
+        start = self._started.get(name)
+        if start is not None:
+            return max(0.0, dt_util.utcnow().timestamp() - start)
+        return self._last_cycle.get(name, 0.0)
+
+    def zone_last_cycle(self, name: str) -> float:
+        """Seconds of the zone's last completed run."""
+        return self._last_cycle.get(name, 0.0)
 
     @property
-    def total_runtime(self) -> float:
-        """Total seconds cooled across all zones."""
-        return sum(self.zone_runtime(zone.name) for zone in self.zones)
+    def session_runtime(self) -> float:
+        """Seconds cooled across all zones in the current cooling session.
+
+        A session starts when demand returns to a fully quiet system and
+        the total resets to zero at that moment.
+        """
+        now = dt_util.utcnow().timestamp()
+        return self._session_runtime + sum(
+            max(0.0, now - start) for start in self._started.values()
+        )
 
     @property
-    def runtime_since(self) -> datetime | None:
-        """When runtime tracking began."""
-        if self._runtime_since is None:
+    def session_started(self) -> datetime | None:
+        """When the current cooling session began."""
+        if self._session_started is None:
             return None
-        return dt_util.utc_from_timestamp(self._runtime_since)
+        return dt_util.utc_from_timestamp(self._session_started)
 
     # -------------------------------------------------------------- events
 
@@ -292,7 +312,7 @@ class CoolingZoneManager:
         requesting = {z.name for z in self.zones if self._is_on(z.request_entity)}
 
         # 0) Runtime bookkeeping, derived from the same observed states.
-        self._track_runtime(on)
+        self._track_runtime(on, requesting)
 
         # 1) Clean up stale timers, and re-admit zones whose request came
         #    back during their overlap (this is the anti-short-cycle fix).
@@ -404,12 +424,22 @@ class CoolingZoneManager:
 
     # ------------------------------------------------------ runtime tracking
 
-    def _track_runtime(self, on: set[str]) -> None:
-        """Derive per-zone start times and accumulate finished runs."""
+    def _track_runtime(self, on: set[str], requesting: set[str]) -> None:
+        """Derive run starts/ends, cycle durations, and the session total."""
         now = dt_util.utcnow().timestamp()
-        if self._runtime_since is None:
-            self._runtime_since = now
+
+        # A new session begins when demand returns to a fully quiet system
+        # (nothing requesting, nothing running): the total resets to zero.
+        active = bool(requesting or on)
+        if active and (self._idle or self._session_started is None):
+            self._session_runtime = 0.0
+            self._session_started = now
             self._dirty = True
+            _LOGGER.info("New cooling session started; session total reset")
+        if self._idle != (not active):
+            self._idle = not active
+            self._dirty = True
+
         for zone in self.zones:
             name = zone.name
             if name in on:
@@ -433,9 +463,9 @@ class CoolingZoneManager:
                     if state is not None and state.state == "off"
                     else now
                 )
-                self._runtime[name] = self._runtime.get(name, 0.0) + max(
-                    0.0, end - start
-                )
+                duration = max(0.0, end - start)
+                self._last_cycle[name] = duration
+                self._session_runtime += duration
                 self._dirty = True
         # A marker for a zone that is definitively off belongs to a run that
         # ended while HA was down; its tail cannot be recovered, so drop it.
@@ -538,8 +568,10 @@ class CoolingZoneManager:
         await self._store.async_save(
             {
                 "rr": list(self._rr),
-                "runtime": dict(self._runtime),
                 "started": dict(self._started),
-                "runtime_since": self._runtime_since,
+                "last_cycle": dict(self._last_cycle),
+                "session_runtime": self._session_runtime,
+                "session_started": self._session_started,
+                "idle": self._idle,
             }
         )
