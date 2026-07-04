@@ -4,10 +4,10 @@
   "codeowners": [],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/YOUR-GITHUB-USERNAME/cooling-zone-manager",
+  "documentation": "https://github.com/photomatix18/cooling-zone-manager",
   "integration_type": "hub",
   "iot_class": "calculated",
-  "issue_tracker": "https://github.com/YOUR-GITHUB-USERNAME/cooling-zone-manager/issues",
+  "issue_tracker": "https://github.com/photomatix18/cooling-zone-manager/issues",
   "requirements": [],
-  "version": "1.0.0"
+  "version": "1.1.0"
 }

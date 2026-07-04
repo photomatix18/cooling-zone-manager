@@ -4,11 +4,14 @@ from __future__ import annotations
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.loader import async_get_integration
 
 from .const import (
+    CONF_MAX_RUN,
     CONF_MAX_ZONES,
     CONF_OVERLAP,
     CONF_ZONES,
+    DEFAULT_MAX_RUN,
     DEFAULT_MAX_ZONES,
     DEFAULT_OVERLAP,
     DOMAIN,
@@ -27,7 +30,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         zones,
         int(entry.data.get(CONF_MAX_ZONES, DEFAULT_MAX_ZONES)),
         int(entry.data.get(CONF_OVERLAP, DEFAULT_OVERLAP)),
+        int(entry.data.get(CONF_MAX_RUN, DEFAULT_MAX_RUN)),
     )
+    integration = await async_get_integration(hass, DOMAIN)
+    manager.version = str(integration.version)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = manager
 
     # Set up entities first (the number entities restore their last values

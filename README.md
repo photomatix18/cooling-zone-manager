@@ -8,20 +8,36 @@ A custom Home Assistant integration that lets **at most N cooling zones run at t
 - Fairness is **round-robin**: when there are more requests than slots, the zone that has waited longest gets the next free slot.
 - When a zone's request turns off, the next waiting zone starts **immediately**, and the old zone keeps running for the **overlap time** before shutting off (a smooth handoff).
 - If the old zone's request comes back during the overlap, it just keeps running — no short-cycling.
+- If a zone has been cooling longer than the **max zone run time** while other zones are waiting, it gets rotated out (same smooth handoff) and goes to the back of the queue — one stubborn zone can't hog the capacity. Set it to `0` to disable.
 - Lowering **Max zones** trims the oldest-running zones immediately.
+- Every zone's **runtime is tracked** (per zone and total, surviving restarts) so you can see which zones work hardest.
 - The manager re-derives everything from live entity states, so it self-heals after Home Assistant restarts, reloads, or manual switch flips. (A zone switched on by hand with no request will be wound down after the overlap time.)
 
 ## Entities it creates
 
-One device ("Cooling Zone Manager") with three entities:
+One device ("Cooling Zone Manager") showing the installed **version**, with these entities:
 
 | Entity | Purpose |
 |---|---|
 | `number.cooling_zone_manager_max_zones` | Max zones allowed at once — change it any time |
 | `number.cooling_zone_manager_overlap_time` | Overlap / wind-down time in seconds |
-| `sensor.cooling_zone_manager_active_zones` | How many zones are cooling now; attributes show active / requesting / winding-down / waiting zones and the round-robin order |
+| `number.cooling_zone_manager_max_zone_run_time` | Longest a zone may cool while others wait, in seconds (`0` = no limit) |
+| `sensor.cooling_zone_manager_active_zones` | How many zones are cooling now; attributes show active / requesting / winding-down / waiting / preempted zones, the round-robin order, a per-zone detail map, and the version |
+| `sensor.cooling_zone_manager_<zone>_status` | One per zone: `cooling`, `winding_down`, `waiting`, or `idle`, with the request state, actual switch state, current run duration, and total runtime as attributes |
+| `sensor.cooling_zone_manager_<zone>_runtime` | One per zone: total time the zone has spent cooling |
+| `sensor.cooling_zone_manager_total_runtime` | Total cooling time across all zones, with a per-zone breakdown attribute |
 
-Both numbers remember their values across restarts, so they replace the old `input_number` helpers.
+The numbers remember their values across restarts, so they replace the old `input_number` helpers. The runtime sensors persist across restarts too, and are statistics-friendly — point a [utility meter helper](https://www.home-assistant.io/integrations/utility_meter/) at them for daily/weekly/monthly runtime.
+
+## Max zone run time (fairness limit)
+
+Sometimes one zone can't reach its setpoint — an oversized room, a heat wave, a wide-open door — and would otherwise occupy a cooling slot forever while other zones wait. When **Max zone run time** is set (e.g. `3600` = 1 hour):
+
+- A zone that has been cooling that long **while at least one other zone is waiting** is wound down with the normal overlap handoff, and the waiting zone starts immediately.
+- The rotated-out zone goes to the back of the round-robin queue. Its request is still on, so it re-enters the rotation and gets another turn when capacity frees up.
+- If **no** zone is waiting, nothing happens — the zone keeps cooling as long as it needs. The limit only enforces fairness; it never wastes free capacity.
+
+Set it to `0` (the default) to disable the limit entirely.
 
 ---
 
@@ -60,7 +76,7 @@ HACS installs integrations from GitHub repositories, so this repo needs to live 
 
 1. In Home Assistant, open **HACS** in the sidebar.
 2. Click the **⋮ (three-dot) menu** in the top-right → **Custom repositories**.
-3. Repository: paste your repo's address, e.g. `https://github.com/YOUR-USERNAME/cooling-zone-manager`
+3. Repository: paste your repo's address: `https://github.com/photomatix18/cooling-zone-manager`
 4. Type: **Integration** → click **Add**, then close the dialog.
 5. In HACS, search for **Cooling Zone Manager**, open it, and click **Download**.
 6. Restart Home Assistant when prompted.
@@ -70,7 +86,7 @@ HACS installs integrations from GitHub repositories, so this repo needs to live 
 ## Configuration
 
 1. Go to **Settings → Devices & Services → + Add Integration** and search for **Cooling Zone Manager**.
-2. First screen: pick a name, the max zones (e.g. `2`) and overlap seconds (e.g. `15`).
+2. First screen: pick a name, the max zones (e.g. `2`), overlap seconds (e.g. `15`), and max zone run time (e.g. `3600` for 1 hour, or `0` for no limit).
 3. Then add each zone one at a time. Example for a three-zone setup:
 
    | Zone name | Request entity | Cooling switch |
@@ -98,9 +114,9 @@ Every start, wind-down, re-admit, and shutoff is then logged under Settings → 
 
 ## Changing things later
 
-- **Max zones / overlap:** change the two number entities any time (dashboard, automations, voice — anything that can set a number).
+- **Max zones / overlap / max run time:** change the three number entities any time (dashboard, automations, voice — anything that can set a number).
 - **Add, remove, or rename zones:** delete the integration entry (Settings → Devices & Services → Cooling Zone Manager → ⋮ → Delete) and add it again with the new zone list. Takes about a minute.
-- **Updating the code:** if the files change, upload the new versions to the GitHub repo the same drag-and-drop way (GitHub → **Add file → Upload files**) and raise the `"version"` number in `custom_components/cooling_zone_manager/manifest.json` (e.g. `1.0.0` → `1.0.1`). HACS will then offer the update.
+- **Updating the code:** if the files change, upload the new versions to the GitHub repo the same drag-and-drop way (GitHub → **Add file → Upload files**) and raise the `"version"` number in `custom_components/cooling_zone_manager/manifest.json` (e.g. `1.1.0` → `1.1.1`). HACS will then offer the update, and after restarting you can confirm the new version on the integration's device page. What changed in each release is listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## How the handoff works (details)
 

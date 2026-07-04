@@ -20,7 +20,11 @@ async def async_setup_entry(
     """Set up the number entities."""
     manager: CoolingZoneManager = hass.data[DOMAIN][entry.entry_id]
     async_add_entities(
-        [MaxZonesNumber(manager, entry), OverlapNumber(manager, entry)]
+        [
+            MaxZonesNumber(manager, entry),
+            OverlapNumber(manager, entry),
+            MaxRunNumber(manager, entry),
+        ]
     )
 
 
@@ -39,6 +43,7 @@ class _ManagerNumber(RestoreNumber):
             name=entry.title,
             manufacturer="Cooling Zone Manager",
             model="Zone arbiter",
+            sw_version=manager.version,
         )
 
     def _push(self, value: float) -> None:
@@ -95,3 +100,22 @@ class OverlapNumber(_ManagerNumber):
 
     def _push(self, value: float) -> None:
         self._manager.overlap = int(value)
+
+
+class MaxRunNumber(_ManagerNumber):
+    """Longest a zone may cool while other zones wait. 0 disables it."""
+
+    _attr_name = "Max zone run time"
+    _attr_icon = "mdi:timer-alert-outline"
+    _attr_native_min_value = 0
+    _attr_native_max_value = 28800
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
+
+    def __init__(self, manager: CoolingZoneManager, entry: ConfigEntry) -> None:
+        super().__init__(manager, entry)
+        self._attr_unique_id = f"{entry.entry_id}_max_run"
+        self._attr_native_value = manager.max_run
+
+    def _push(self, value: float) -> None:
+        self._manager.max_run = int(value)
