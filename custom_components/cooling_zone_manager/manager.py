@@ -14,6 +14,12 @@ Same behavior as the YAML v2 automation, implemented natively:
   zones are waiting, it is rotated out with the same overlap handoff and
   sent to the back of the round-robin queue. A zone with no competition is
   never cut off.
+* A zone that just finished a run must rest — off for as long as it last ran,
+  capped at ``max_run`` — before it can *force* another zone out. Without
+  this, a rotated-out zone whose wind-down expires while it is the only
+  waiter instantly evicts the other long-runner (whose clock never reset
+  during the handoff) and re-seats itself with a zero-second off blink.
+  Resting zones still take naturally-freed capacity immediately.
 * Lowering ``max_zones`` trims the oldest-started zones immediately.
 * Everything is re-derived from live entity states on every pass, so the
   manager self-heals after restarts, reloads, or manual switch changes.
@@ -93,11 +99,17 @@ class CoolingZoneManager:
         self._preempted: dict[str, str] = {}
         # zone name -> (fire-at epoch, cancel) for its max-run timer
         self._maxrun_timers: dict[str, tuple[float, CALLBACK_TYPE]] = {}
+        # (fire-at epoch, cancel) for the single rest timer: a reconcile
+        # scheduled for when a resting waiter may force a rotation again.
+        self._rest_timer: tuple[float, CALLBACK_TYPE] | None = None
         # Runtime bookkeeping: when each running zone started (epoch), how
         # long each zone's last completed run took, and the completed-run
         # seconds of the current cooling session.
         self._started: dict[str, float] = {}
         self._last_cycle: dict[str, float] = {}
+        # zone name -> when its last completed run ended (epoch); drives
+        # the rest requirement before it may force a rotation.
+        self._last_run_end: dict[str, float] = {}
         self._session_runtime = 0.0
         self._session_started: float | None = None
         # True once every zone is satisfied and switched off; the next
@@ -127,6 +139,12 @@ class CoolingZoneManager:
                 self._last_cycle = {
                     name: float(value)
                     for name, value in data["last_cycle"].items()
+                    if name in known
+                }
+            if isinstance(data.get("last_run_end"), dict):
+                self._last_run_end = {
+                    name: float(value)
+                    for name, value in data["last_run_end"].items()
                     if name in known
                 }
             if isinstance(data.get("started"), dict):
@@ -175,6 +193,9 @@ class CoolingZoneManager:
         for _fire_at, cancel in self._maxrun_timers.values():
             cancel()
         self._maxrun_timers.clear()
+        if self._rest_timer is not None:
+            self._rest_timer[1]()
+            self._rest_timer = None
 
         # Runs in progress keep their original start marker: on reload the
         # cycle continues from its true start, nothing double-counts.
@@ -244,6 +265,17 @@ class CoolingZoneManager:
             for name in self._rr
             if name not in on and self._is_on(self._by_name[name].request_entity)
         ]
+
+    @property
+    def resting_zones(self) -> list[str]:
+        """Waiting zones still resting after their last run.
+
+        They may take freed capacity, but cannot force a rotation yet.
+        """
+        if self.max_run <= 0:
+            return []
+        now = dt_util.utcnow().timestamp()
+        return [name for name in self.waiting_zones if self._rested_at(name) > now]
 
     @property
     def rr_order(self) -> list[str]:
@@ -444,15 +476,35 @@ class CoolingZoneManager:
         # 3) Max-run rotation: if a zone has been cooling past the limit
         #    while others wait, rotate it out (overlap handoff, back of the
         #    round-robin queue). One zone per pass keeps handoffs smooth.
+        #    Only rested waiters count: a zone that just gave up its slot
+        #    may not force another zone out (its own wind-down expiry would
+        #    otherwise re-seat it instantly, evicting whichever zone ran
+        #    through the handoff). It can still take freed capacity below.
+        rest_check_at: float | None = None
         if self.max_run > 0:
             winding = set(self._winddown)
-            waiting = [n for n in self._rr if n in requesting and n not in on]
-            if waiting:
-                now = dt_util.utcnow().timestamp()
-                for name in [n for n in self._rr if n in on and n not in winding]:
-                    start = self._started.get(name)
-                    if start is None or now - start < self.max_run:
+            now = dt_util.utcnow().timestamp()
+            over = [
+                name
+                for name in self._rr
+                if name in on
+                and name not in winding
+                and self._started.get(name) is not None
+                and now - self._started[name] >= self.max_run
+            ]
+            if over:
+                waiting: list[str] = []
+                resting: list[float] = []
+                for name in self._rr:
+                    if name in on or name not in requesting:
                         continue
+                    rested_at = self._rested_at(name)
+                    if rested_at <= now:
+                        waiting.append(name)
+                    else:
+                        resting.append(rested_at)
+                if waiting:
+                    name = over[0]
                     _LOGGER.info(
                         "Zone '%s' hit max run time (%s s) with zones waiting;"
                         " rotating it out",
@@ -464,7 +516,11 @@ class CoolingZoneManager:
                     self._rr.remove(name)
                     self._rr.append(name)
                     self._dirty = True
-                    break
+                elif resting:
+                    # Every waiter is still resting: re-check when the
+                    # first of them has rested long enough.
+                    rest_check_at = min(resting)
+        self._update_rest_timer(rest_check_at)
 
         # 4) Temperature shed: when the outdoor temperature lowers the
         #    capacity below what is running, wind the excess down gracefully
@@ -583,6 +639,7 @@ class CoolingZoneManager:
                 )
                 duration = max(0.0, end - start)
                 self._last_cycle[name] = duration
+                self._last_run_end[name] = end
                 self._session_runtime += duration
                 self._dirty = True
         # A marker for a zone that is definitively off belongs to a run that
@@ -593,6 +650,46 @@ class CoolingZoneManager:
             state = self.hass.states.get(self._by_name[name].switch_entity)
             if state is not None and state.state == "off":
                 del self._restored_started[name]
+
+    # ------------------------------------------------------------ rest gate
+
+    def _rested_at(self, name: str) -> float:
+        """When the zone has rested enough to force a rotation again.
+
+        A zone must stay off for as long as its last run lasted (capped at
+        ``max_run``) before it may preempt another zone. Zones that never
+        ran are always rested.
+        """
+        end = self._last_run_end.get(name)
+        if end is None:
+            return 0.0
+        return end + min(self.max_run, self._last_cycle.get(name, 0.0))
+
+    def _update_rest_timer(self, fire_at: float | None) -> None:
+        """Ensure a reconcile fires when a resting waiter becomes rested."""
+        current = self._rest_timer
+        if current is not None and (fire_at is None or abs(current[0] - fire_at) > 1):
+            current[1]()
+            self._rest_timer = None
+            current = None
+        if fire_at is None or current is not None:
+            return
+
+        @callback
+        def _expired(_now) -> None:
+            self._rest_timer = None
+            self.hass.async_create_task(self.async_reconcile())
+
+        now = dt_util.utcnow().timestamp()
+        _LOGGER.info(
+            "Max-run rotation deferred: all waiting zones are resting;"
+            " re-checking in %.0f s",
+            fire_at - now,
+        )
+        self._rest_timer = (
+            fire_at,
+            async_call_later(self.hass, fire_at - now + 1, _expired),
+        )
 
     # ---------------------------------------------------------- max-run timer
 
@@ -688,6 +785,7 @@ class CoolingZoneManager:
                 "rr": list(self._rr),
                 "started": dict(self._started),
                 "last_cycle": dict(self._last_cycle),
+                "last_run_end": dict(self._last_run_end),
                 "session_runtime": self._session_runtime,
                 "session_started": self._session_started,
                 "idle": self._idle,

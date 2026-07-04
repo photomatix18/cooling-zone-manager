@@ -2,6 +2,36 @@
 
 All notable changes to the Cooling Zone Manager integration are documented here.
 
+## 1.4.2 — 2026-07-03
+
+### Fixed
+
+- **Max-run rotation no longer lets a zone instantly reclaim its slot.**
+  When the running zones' clocks were in sync (e.g. both started when the
+  cooling session began) and one hit the max run time, the other was also
+  over the limit — and the moment the rotated-out zone finished its overlap
+  wind-down, it became the only "waiting" zone, immediately evicted the
+  other long-runner (whose run clock had legitimately never reset through
+  the handoff), and re-seated itself with a zero-second off blink. The
+  visible symptoms: rotations arriving in pairs one overlap apart, a zone
+  keeping its slot for only the overlap time after a rotation, switches
+  blinking off/on within a second, and cycle-runtime sensors resetting
+  mid-run.
+
+  Now a zone that just finished a run must **rest** — stay off for as long
+  as its last run lasted, capped at the max run time — before it can force
+  another zone out. It can still take naturally-freed capacity immediately
+  (a zone that shuts off because its room is satisfied is unaffected). With
+  three zones and two slots this converges to clean single rotations: each
+  zone cools in one continuous stretch, then rests its fair share. All
+  other configurations behave exactly as before.
+
+### Added
+
+- The **Active zones** sensor now lists `resting` zones (waiting zones that
+  can't force a rotation yet) so you can see the rotation logic's state at
+  a glance.
+
 ## 1.4.1 — 2026-07-03
 
 ### Added

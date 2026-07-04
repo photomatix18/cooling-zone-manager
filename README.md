@@ -59,6 +59,7 @@ Sometimes one zone can't reach its setpoint — an oversized room, a heat wave, 
 
 - A zone that has been cooling that long **while at least one other zone is waiting** is wound down with the normal overlap handoff, and the waiting zone starts immediately.
 - The rotated-out zone goes to the back of the round-robin queue. Its request is still on, so it re-enters the rotation and gets another turn when capacity frees up.
+- A zone that just finished a run must **rest** — stay off for as long as its last run lasted (capped at the max run time) — before it can *force* another zone out. This keeps a rotated-out zone from instantly evicting the other long-runner the moment its own wind-down ends. A resting zone still takes naturally-freed capacity immediately, and the Active zones sensor lists `resting` zones so you can see it working.
 - If **no** zone is waiting, nothing happens — the zone keeps cooling as long as it needs. The limit only enforces fairness; it never wastes free capacity.
 
 Set it to `0` (the default) to disable the limit entirely.

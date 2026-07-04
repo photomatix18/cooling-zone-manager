@@ -94,6 +94,7 @@ class ZoneStatusSensor(_ManagerSensor):
             "requesting": manager.requesting_zones,
             "winding_down": manager.winding_down,
             "waiting": manager.waiting_zones,
+            "resting": manager.resting_zones,
             "preempted": manager.preempted_zones,
             "round_robin_order": manager.rr_order,
             "max_zones": manager.max_zones,
