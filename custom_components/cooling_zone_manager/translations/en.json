@@ -29,5 +29,49 @@
       "duplicate_switch": "This cooling switch is already used by another zone.",
       "same_entity": "The request entity and the cooling switch must be different entities."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Cooling Zone Manager",
+        "menu_options": {
+          "temp_sensor": "Outdoor temperature sensor",
+          "add_zone": "Add a zone",
+          "remove_zone": "Remove zones"
+        }
+      },
+      "temp_sensor": {
+        "title": "Outdoor temperature sensor",
+        "description": "Pick a sensor to let the outdoor temperature limit how many zones may run at once, or clear the field to turn the feature off. The change applies immediately.",
+        "data": {
+          "temp_sensor": "Outdoor temperature sensor"
+        }
+      },
+      "add_zone": {
+        "title": "Add a cooling zone",
+        "description": "Current zones: {zone_count}. The new zone joins the rotation immediately.",
+        "data": {
+          "name": "Zone name (e.g. bedrooms)",
+          "request_entity": "Request entity (the demand signal, read-only)",
+          "switch_entity": "Cooling switch (what gets turned on and off)",
+          "add_another": "Add another zone after this one"
+        }
+      },
+      "remove_zone": {
+        "title": "Remove zones",
+        "description": "Removed zones are switched off if they are currently cooling. At least one zone must remain.",
+        "data": {
+          "zones": "Zones to remove"
+        }
+      }
+    },
+    "error": {
+      "empty_name": "Please enter a zone name.",
+      "duplicate_name": "A zone with this name already exists.",
+      "duplicate_switch": "This cooling switch is already used by another zone.",
+      "same_entity": "The request entity and the cooling switch must be different entities.",
+      "no_zones_selected": "Select at least one zone to remove.",
+      "keep_one_zone": "At least one zone must remain."
+    }
   }
 }

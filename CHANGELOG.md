@@ -2,6 +2,23 @@
 
 All notable changes to the Cooling Zone Manager integration are documented here.
 
+## 1.4.0 — 2026-07-03
+
+### Added
+
+- **Options flow — reconfigure without re-adding.** Settings → Devices &
+  Services → Cooling Zone Manager → **Configure** now offers:
+  - **Outdoor temperature sensor**: pick, change, or clear it. This is how
+    existing installs enable the temperature-aware capacity from 1.3.0 —
+    no more delete-and-re-add.
+  - **Add a zone**: joins the rotation immediately.
+  - **Remove zones**: removed zones are switched off first if they're
+    cooling, and their leftover sensor entities are cleaned up. At least
+    one zone must remain.
+  - Changes apply immediately (the integration reloads itself), and all
+    tuned values (max zones, overlap, max run time, thresholds, runtime
+    history) are preserved.
+
 ## 1.3.0 — 2026-07-03
 
 ### Added

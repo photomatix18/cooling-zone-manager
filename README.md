@@ -33,7 +33,7 @@ The numbers remember their values across restarts, so they replace the old `inpu
 
 ## Temperature-aware capacity (optional)
 
-If your AC can't keep up with several zones on a hot day, pick an **outdoor temperature sensor** when adding the integration. You then get one threshold number per zone beyond the first — with three zones:
+If your AC can't keep up with several zones on a hot day, pick an **outdoor temperature sensor** when adding the integration (or add one later via **Configure** on the integration entry). You then get one threshold number per zone beyond the first — with three zones:
 
 | Entity | Meaning | Default |
 |---|---|---|
@@ -134,8 +134,8 @@ Every start, wind-down, re-admit, and shutoff is then logged under Settings → 
 
 ## Changing things later
 
-- **Max zones / overlap / max run time:** change the three number entities any time (dashboard, automations, voice — anything that can set a number).
-- **Add, remove, or rename zones:** delete the integration entry (Settings → Devices & Services → Cooling Zone Manager → ⋮ → Delete) and add it again with the new zone list. Takes about a minute.
+- **Max zones / overlap / max run time / temperature thresholds:** change the number entities any time (dashboard, automations, voice — anything that can set a number).
+- **Add or remove zones, or change the outdoor temperature sensor:** Settings → Devices & Services → Cooling Zone Manager → **Configure**. Changes apply immediately; removed zones are switched off first if they're cooling. (Renaming a zone = remove it, then add it with the new name.)
 - **Updating the code:** if the files change, upload the new versions to the GitHub repo the same drag-and-drop way (GitHub → **Add file → Upload files**) and raise the `"version"` number in `custom_components/cooling_zone_manager/manifest.json` (e.g. `1.1.0` → `1.1.1`). HACS will then offer the update, and after restarting you can confirm the new version on the integration's device page. What changed in each release is listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## How the handoff works (details)

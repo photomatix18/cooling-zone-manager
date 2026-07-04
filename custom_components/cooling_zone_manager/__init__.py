@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.loader import async_get_integration
 
 from .const import (
@@ -43,11 +44,47 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     manager.version = str(integration.version)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = manager
 
+    # Drop registry entries for zones/thresholds that no longer exist
+    # (the options flow can remove zones or the temperature sensor).
+    _async_cleanup_orphans(hass, entry, manager)
+
     # Set up entities first (the number entities restore their last values
     # and push them into the manager), then start reconciling.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     await manager.async_start()
+
+    # Reload when the options flow changes the entry data.
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
+
+
+async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Apply options-flow changes by reloading the entry."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+@callback
+def _async_cleanup_orphans(
+    hass: HomeAssistant, entry: ConfigEntry, manager: CoolingZoneManager
+) -> None:
+    """Remove registry entities that no current zone or setting provides."""
+    registry = er.async_get(hass)
+    expected = {
+        f"{entry.entry_id}_status",
+        f"{entry.entry_id}_total_runtime",
+        f"{entry.entry_id}_max_zones",
+        f"{entry.entry_id}_overlap",
+        f"{entry.entry_id}_max_run",
+    }
+    for zone in manager.zones:
+        expected.add(f"{entry.entry_id}_zone_{zone.name}_status")
+        expected.add(f"{entry.entry_id}_zone_{zone.name}_runtime")
+    if manager.temp_entity:
+        for tier in range(2, len(manager.zones) + 1):
+            expected.add(f"{entry.entry_id}_threshold_{tier}")
+    for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if entity.unique_id not in expected:
+            registry.async_remove(entity.entity_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
