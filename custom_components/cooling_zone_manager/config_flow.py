@@ -16,6 +16,7 @@ from .const import (
     CONF_OVERLAP,
     CONF_REQUEST_ENTITY,
     CONF_SWITCH_ENTITY,
+    CONF_TEMP_SENSOR,
     CONF_ZONE_NAME,
     CONF_ZONES,
     DEFAULT_MAX_RUN_MINUTES,
@@ -78,6 +79,11 @@ class CoolingZoneManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         unit_of_measurement="min",
                     )
                 ),
+                vol.Optional(CONF_TEMP_SENSOR): selector.EntitySelector(
+                    selector.EntitySelectorConfig(
+                        domain="sensor", device_class="temperature"
+                    )
+                ),
             }
         )
         return self.async_show_form(step_id="user", data_schema=schema)
@@ -112,18 +118,21 @@ class CoolingZoneManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
                 if user_input.get(CONF_ADD_ANOTHER):
                     return await self.async_step_zone()
+                data = {
+                    CONF_ZONES: self._zones,
+                    CONF_MAX_ZONES: int(self._settings[CONF_MAX_ZONES]),
+                    CONF_OVERLAP: int(self._settings[CONF_OVERLAP]),
+                    CONF_MAX_RUN_MINUTES: int(
+                        self._settings.get(
+                            CONF_MAX_RUN_MINUTES, DEFAULT_MAX_RUN_MINUTES
+                        )
+                    ),
+                }
+                if self._settings.get(CONF_TEMP_SENSOR):
+                    data[CONF_TEMP_SENSOR] = self._settings[CONF_TEMP_SENSOR]
                 return self.async_create_entry(
                     title=self._settings.get(CONF_NAME, DEFAULT_NAME),
-                    data={
-                        CONF_ZONES: self._zones,
-                        CONF_MAX_ZONES: int(self._settings[CONF_MAX_ZONES]),
-                        CONF_OVERLAP: int(self._settings[CONF_OVERLAP]),
-                        CONF_MAX_RUN_MINUTES: int(
-                            self._settings.get(
-                                CONF_MAX_RUN_MINUTES, DEFAULT_MAX_RUN_MINUTES
-                            )
-                        ),
-                    },
+                    data=data,
                 )
 
         schema = vol.Schema(

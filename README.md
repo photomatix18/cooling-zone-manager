@@ -10,6 +10,7 @@ A custom Home Assistant integration that lets **at most N cooling zones run at t
 - If the old zone's request comes back during the overlap, it just keeps running — no short-cycling.
 - If a zone has been cooling longer than the **max zone run time** while other zones are waiting, it gets rotated out (same smooth handoff) and goes to the back of the queue — one stubborn zone can't hog the capacity. Set it to `0` to disable.
 - Lowering **Max zones** trims the oldest-running zones immediately.
+- Optionally, an **outdoor temperature sensor** scales the capacity automatically — e.g. only 1 zone above 85°, 2 below 85°, all 3 below 75° — with hysteresis so a hovering reading doesn't flap zones. See below.
 - **Runtime is tracked** per cycle: each zone shows how long its current run has been cooling, and a session total accumulates across zones until everything is satisfied — then the next request starts a fresh session. Survives restarts.
 - The manager re-derives everything from live entity states, so it self-heals after Home Assistant restarts, reloads, or manual switch flips. (A zone switched on by hand with no request will be wound down after the overlap time.)
 
@@ -26,8 +27,27 @@ One device ("Cooling Zone Manager") showing the installed **version**, with thes
 | `sensor.cooling_zone_manager_<zone>_status` | One per zone: `cooling`, `winding_down`, `waiting`, or `idle`, with the request state, actual switch state, and cycle runtime as attributes |
 | `sensor.cooling_zone_manager_<zone>_runtime` | One per zone: how long the **current run** has been cooling. Resets when the zone starts; holds the last run's duration while off (`running` attribute says which) |
 | `sensor.cooling_zone_manager_total_runtime` | Cooling time across all zones for the **current session**. Resets when a zone requests again after everything was satisfied |
+| `number.cooling_zone_manager_allow_2_zones_below` etc. | Only when an outdoor temperature sensor is configured: one threshold per zone beyond the first (see below) |
 
 The numbers remember their values across restarts, so they replace the old `input_number` helpers. The runtime tracking persists across restarts too.
+
+## Temperature-aware capacity (optional)
+
+If your AC can't keep up with several zones on a hot day, pick an **outdoor temperature sensor** when adding the integration. You then get one threshold number per zone beyond the first — with three zones:
+
+| Entity | Meaning | Default |
+|---|---|---|
+| **Allow 2 zones below** | Outdoor temp below which 2 zones may run | 85 °F / 29 °C |
+| **Allow 3 zones below** | Outdoor temp below which all 3 may run | 75 °F / 24 °C |
+
+Above the first threshold only 1 zone runs at a time. The temperature limit combines with **Max zones** by taking the smaller of the two, so Max zones remains your hard ceiling.
+
+Details that keep it smooth:
+
+- **Hysteresis (1°):** the reading must cross a threshold by a full degree before capacity changes, so 84.9° → 85.1° → 84.9° doesn't flap zones on and off.
+- **Graceful shedding:** when a rising temperature lowers the capacity below what's running, the excess zones (oldest first) wind down through the normal overlap instead of being switched off instantly, and go to the back of the round-robin queue.
+- **Fail-safe:** if the sensor goes unavailable, the manual Max zones applies unchanged.
+- The Active zones sensor shows `outdoor_temp`, `temp_allowed_zones`, and `effective_max_zones` attributes so you can always see why the manager chose its current limit.
 
 ## Max zone run time (fairness limit)
 
@@ -86,7 +106,7 @@ HACS installs integrations from GitHub repositories, so this repo needs to live 
 ## Configuration
 
 1. Go to **Settings → Devices & Services → + Add Integration** and search for **Cooling Zone Manager**.
-2. First screen: pick a name, the max zones (e.g. `2`), overlap seconds (e.g. `15`), and max zone run time in minutes (e.g. `60` for 1 hour, or `0` for no limit).
+2. First screen: pick a name, the max zones (e.g. `2`), overlap seconds (e.g. `15`), max zone run time in minutes (e.g. `60` for 1 hour, or `0` for no limit), and optionally an outdoor temperature sensor for temperature-aware capacity.
 3. Then add each zone one at a time. Example for a three-zone setup:
 
    | Zone name | Request entity | Cooling switch |

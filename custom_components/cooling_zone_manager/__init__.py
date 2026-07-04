@@ -11,6 +11,7 @@ from .const import (
     CONF_MAX_RUN_MINUTES,
     CONF_MAX_ZONES,
     CONF_OVERLAP,
+    CONF_TEMP_SENSOR,
     CONF_ZONES,
     DEFAULT_MAX_ZONES,
     DEFAULT_OVERLAP,
@@ -36,6 +37,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         int(entry.data.get(CONF_MAX_ZONES, DEFAULT_MAX_ZONES)),
         int(entry.data.get(CONF_OVERLAP, DEFAULT_OVERLAP)),
         max_run_seconds,
+        entry.data.get(CONF_TEMP_SENSOR),
     )
     integration = await async_get_integration(hass, DOMAIN)
     manager.version = str(integration.version)

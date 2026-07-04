@@ -2,6 +2,30 @@
 
 All notable changes to the Cooling Zone Manager integration are documented here.
 
+## 1.3.0 — 2026-07-03
+
+### Added
+
+- **Temperature-aware capacity.** Pick an optional outdoor temperature sensor
+  in the config flow and the integration limits how many zones may run at
+  once based on the heat outside:
+  - One threshold number entity per zone beyond the first — e.g. with three
+    zones you get **Allow 2 zones below** (default 85 °F / 29 °C) and
+    **Allow 3 zones below** (default 75 °F / 24 °C). Tune them any time.
+  - The effective limit is the smaller of the manual **Max zones** and what
+    the temperature allows, so Max zones stays your hard ceiling.
+  - **1° hysteresis**: the reading must cross a threshold by a full degree
+    before capacity changes, so a temperature hovering at the boundary
+    doesn't flap zones on and off.
+  - When the temperature *lowers* capacity below what's running, excess
+    zones wind down gracefully with the normal overlap handoff (oldest
+    first) instead of being cut off instantly.
+  - If the sensor is unavailable or no sensor is configured, the manual
+    Max zones applies unchanged.
+  - The Active zones sensor now shows `outdoor_temp`, `temp_allowed_zones`,
+    and `effective_max_zones` attributes so you can see why the manager
+    chose its current limit.
+
 ## 1.2.0 — 2026-07-03
 
 ### Changed

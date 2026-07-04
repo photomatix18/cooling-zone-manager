@@ -38,7 +38,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, STORAGE_VERSION
+from .const import DOMAIN, STORAGE_VERSION, TEMP_HYSTERESIS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,6 +63,7 @@ class CoolingZoneManager:
         max_zones: int,
         overlap: int,
         max_run: int = 0,
+        temp_entity: str | None = None,
     ) -> None:
         self.hass = hass
         self.zones = zones
@@ -70,6 +71,14 @@ class CoolingZoneManager:
         self.overlap = int(overlap)
         # Longest a zone may run while others wait; 0 disables the limit.
         self.max_run = int(max_run)
+        # Optional outdoor temperature sensor for temperature-aware capacity.
+        self.temp_entity = temp_entity
+        # tier -> outdoor temperature below which that many zones may run;
+        # pushed by the threshold number entities.
+        self.zone_thresholds: dict[int, float] = {}
+        # Last outdoor reading and the zone count it currently allows.
+        self.outdoor_temp: float | None = None
+        self._temp_tier: int | None = None
         # Integration version, filled in by async_setup_entry for display.
         self.version: str | None = None
 
@@ -78,9 +87,10 @@ class CoolingZoneManager:
         self._rr: list[str] = [zone.name for zone in zones]
         # zone name -> cancel callback for its wind-down timer
         self._winddown: dict[str, CALLBACK_TYPE] = {}
-        # Zones winding down because they hit max_run. They are not
-        # re-admitted during the overlap even though they still request.
-        self._preempted: set[str] = set()
+        # Zones winding down early: name -> reason ("max_run" or "temp").
+        # They are not re-admitted during the overlap even though they
+        # still request.
+        self._preempted: dict[str, str] = {}
         # zone name -> (fire-at epoch, cancel) for its max-run timer
         self._maxrun_timers: dict[str, tuple[float, CALLBACK_TYPE]] = {}
         # Runtime bookkeeping: when each running zone started (epoch), how
@@ -137,6 +147,8 @@ class CoolingZoneManager:
         for zone in self.zones:
             entities.append(zone.request_entity)
             entities.append(zone.switch_entity)
+        if self.temp_entity:
+            entities.append(self.temp_entity)
         self._unsub_state = async_track_state_change_event(
             self.hass, entities, self._handle_state_event
         )
@@ -211,6 +223,18 @@ class CoolingZoneManager:
     @property
     def preempted_zones(self) -> list[str]:
         return sorted(self._preempted)
+
+    @property
+    def temp_allowed_zones(self) -> int | None:
+        """Zone count the outdoor temperature currently allows, or None."""
+        return self._temp_tier
+
+    @property
+    def effective_max_zones(self) -> int:
+        """The manual cap, further limited by the outdoor temperature."""
+        if self._temp_tier is None:
+            return self.max_zones
+        return max(1, min(self.max_zones, self._temp_tier))
 
     @property
     def waiting_zones(self) -> list[str]:
@@ -290,12 +314,72 @@ class CoolingZoneManager:
             return None
         return dt_util.utc_from_timestamp(self._session_started)
 
+    # ------------------------------------------------- temperature capacity
+
+    def _outdoor_reading(self) -> float | None:
+        if not self.temp_entity:
+            return None
+        state = self.hass.states.get(self.temp_entity)
+        if state is None:
+            return None
+        try:
+            return float(state.state)
+        except (TypeError, ValueError):
+            return None
+
+    def _tier_for(self, temp: float, offset: float) -> int:
+        """Zones allowed at ``temp``, with thresholds shifted by ``offset``."""
+        tier = 1
+        for k in range(2, len(self.zones) + 1):
+            threshold = self.zone_thresholds.get(k)
+            if threshold is None or temp >= threshold + offset:
+                break
+            tier = k
+        return tier
+
+    def _update_temp_tier(self) -> None:
+        """Re-derive the temperature-allowed zone count, with hysteresis.
+
+        Raising capacity requires the temperature to be a full hysteresis
+        band below the threshold; lowering requires it a band above. A
+        reading hovering exactly at a threshold changes nothing.
+        """
+        temp = self._outdoor_reading()
+        self.outdoor_temp = temp
+        if temp is None or not self.zone_thresholds:
+            # No sensor, sensor unavailable, or no thresholds set: the
+            # manual max applies unchanged.
+            self._temp_tier = None
+            return
+        current = self._temp_tier
+        if current is None:
+            self._temp_tier = self._tier_for(temp, 0.0)
+            return
+        raise_to = self._tier_for(temp, -TEMP_HYSTERESIS)
+        lower_to = self._tier_for(temp, TEMP_HYSTERESIS)
+        if raise_to > current:
+            self._temp_tier = raise_to
+        elif lower_to < current:
+            self._temp_tier = lower_to
+        if self._temp_tier != current:
+            _LOGGER.info(
+                "Outdoor temperature %.1f now allows %s zone(s)",
+                temp,
+                self._temp_tier,
+            )
+
     # -------------------------------------------------------------- events
 
     @callback
     def _handle_state_event(self, event: Event) -> None:
         new_state = event.data.get("new_state")
-        if new_state is None or new_state.state not in ("on", "off"):
+        if new_state is None:
+            return
+        if event.data.get("entity_id") == self.temp_entity:
+            # Any temperature change may move the capacity tier.
+            self.hass.async_create_task(self.async_reconcile())
+            return
+        if new_state.state not in ("on", "off"):
             return  # ignore unavailable/unknown flapping
         self.hass.async_create_task(self.async_reconcile())
 
@@ -314,24 +398,37 @@ class CoolingZoneManager:
         # 0) Runtime bookkeeping, derived from the same observed states.
         self._track_runtime(on, requesting)
 
+        # Effective capacity for this pass: the manual cap, possibly
+        # lowered by the outdoor temperature.
+        self._update_temp_tier()
+        limit = self.effective_max_zones
+
         # 1) Clean up stale timers, and re-admit zones whose request came
         #    back during their overlap (this is the anti-short-cycle fix).
         #    Preempted zones are the exception: they still request, but they
         #    used up their turn, so they finish their wind-down anyway.
         if self.max_run <= 0:
-            # The limit was just disabled; pending preemptions are void and
-            # those zones get re-admitted below like any re-requester.
-            self._preempted.clear()
+            # The max-run limit was just disabled; its pending preemptions
+            # are void and those zones get re-admitted below like any
+            # re-requester. Temperature sheds are unaffected.
+            for name in [
+                n for n, reason in self._preempted.items() if reason == "max_run"
+            ]:
+                del self._preempted[name]
         for name in list(self._winddown):
             if name not in on:
                 self._cancel_winddown(name)
-                self._preempted.discard(name)
+                self._preempted.pop(name, None)
             elif name in requesting and name not in self._preempted:
                 self._cancel_winddown(name)
                 _LOGGER.info(
                     "Zone '%s' re-requested during overlap; it stays on", name
                 )
-        self._preempted.intersection_update(self._winddown)
+        self._preempted = {
+            name: reason
+            for name, reason in self._preempted.items()
+            if name in self._winddown
+        }
 
         # 2) Begin wind-down for zones that lost their request. The zone
         #    keeps cooling until its timer fires.
@@ -362,17 +459,38 @@ class CoolingZoneManager:
                         name,
                         self.max_run,
                     )
-                    self._preempted.add(name)
+                    self._preempted[name] = "max_run"
                     self._schedule_winddown(name)
                     self._rr.remove(name)
                     self._rr.append(name)
                     self._dirty = True
                     break
 
+        # 4) Temperature shed: when the outdoor temperature lowers the
+        #    capacity below what is running, wind the excess down gracefully
+        #    (oldest-started first) instead of cutting power instantly.
+        if limit < self.max_zones:
+            winding = set(self._winddown)
+            countable = on - winding
+            excess = len(countable) - limit
+            if excess > 0:
+                for name in [n for n in self._rr if n in countable][:excess]:
+                    _LOGGER.info(
+                        "Outdoor temperature limits capacity to %s zone(s);"
+                        " winding down zone '%s'",
+                        limit,
+                        name,
+                    )
+                    self._preempted[name] = "temp"
+                    self._schedule_winddown(name)
+                    self._rr.remove(name)
+                    self._rr.append(name)
+                    self._dirty = True
+
         winding = set(self._winddown)
         countable = on - winding  # winding zones no longer occupy a slot
 
-        # 4) Capacity trim: immediate, oldest-started first.
+        # 5) Manual capacity trim: immediate, oldest-started first.
         excess = len(countable) - self.max_zones
         if excess > 0:
             for name in [n for n in self._rr if n in countable][:excess]:
@@ -385,7 +503,7 @@ class CoolingZoneManager:
                 countable.discard(name)
                 on.discard(name)
 
-        # 5) Start waiting zones into free capacity, round-robin order.
+        # 6) Start waiting zones into free capacity, round-robin order.
         #    The winding-down zones freeing their slot early is what creates
         #    the overlap: the replacement turns on now, the old zone turns
         #    off when its timer fires.
@@ -394,10 +512,10 @@ class CoolingZoneManager:
             if (
                 name not in on
                 and name in requesting
-                and effective < self.max_zones
+                and effective < limit
                 # At most one zone of handoff surplus at a time; matches the
                 # original automation's behavior.
-                and len(on) < self.max_zones + 1
+                and len(on) < limit + 1
             ):
                 self._rr.remove(name)
                 self._rr.append(name)
@@ -414,7 +532,7 @@ class CoolingZoneManager:
                 # timer are already correct in this same pass.
                 self._started.setdefault(name, dt_util.utcnow().timestamp())
 
-        # 6) Keep a timer on every running zone so a reconcile pass fires
+        # 7) Keep a timer on every running zone so a reconcile pass fires
         #    the moment it crosses the max-run threshold.
         self._update_maxrun_timers(on)
 
@@ -532,7 +650,7 @@ class CoolingZoneManager:
         async with self._lock:
             self._winddown.pop(name, None)
             preempted = name in self._preempted
-            self._preempted.discard(name)
+            self._preempted.pop(name, None)
             zone = self._by_name[name]
             # Only switch off if the request is still gone. If it came back
             # in a race, the zone keeps running. Preempted zones switch off

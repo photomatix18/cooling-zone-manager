@@ -1,9 +1,9 @@
 """Number entities exposing the manager's tunables (max zones, overlap)."""
 from __future__ import annotations
 
-from homeassistant.components.number import NumberMode, RestoreNumber
+from homeassistant.components.number import NumberEntity, NumberMode, RestoreNumber
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory, UnitOfTime
+from homeassistant.const import EntityCategory, UnitOfTemperature, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -19,13 +19,17 @@ async def async_setup_entry(
 ) -> None:
     """Set up the number entities."""
     manager: CoolingZoneManager = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(
-        [
-            MaxZonesNumber(manager, entry),
-            OverlapNumber(manager, entry),
-            MaxRunNumber(manager, entry),
-        ]
-    )
+    entities: list[NumberEntity] = [
+        MaxZonesNumber(manager, entry),
+        OverlapNumber(manager, entry),
+        MaxRunNumber(manager, entry),
+    ]
+    # Temperature-aware capacity: one threshold per zone beyond the first,
+    # only when an outdoor temperature sensor was configured.
+    if manager.temp_entity:
+        for tier in range(2, len(manager.zones) + 1):
+            entities.append(ZoneThresholdNumber(manager, entry, tier))
+    async_add_entities(entities)
 
 
 class _ManagerNumber(RestoreNumber):
@@ -133,3 +137,33 @@ class MaxRunNumber(_ManagerNumber):
 
     def _push(self, value: float) -> None:
         self._manager.max_run = int(value) * 60
+
+
+class ZoneThresholdNumber(_ManagerNumber):
+    """Outdoor temperature below which ``tier`` zones may run at once."""
+
+    _attr_icon = "mdi:thermometer-chevron-down"
+    _attr_native_step = 0.5
+
+    def __init__(
+        self, manager: CoolingZoneManager, entry: ConfigEntry, tier: int
+    ) -> None:
+        super().__init__(manager, entry)
+        self._tier = tier
+        self._attr_unique_id = f"{entry.entry_id}_threshold_{tier}"
+        self._attr_name = f"Allow {tier} zones below"
+        unit = manager.hass.config.units.temperature_unit
+        self._attr_native_unit_of_measurement = unit
+        if unit == UnitOfTemperature.CELSIUS:
+            self._attr_native_min_value = -20
+            self._attr_native_max_value = 55
+            default = 29.0 - 5.0 * (tier - 2)
+        else:
+            self._attr_native_min_value = 0
+            self._attr_native_max_value = 130
+            default = 85.0 - 10.0 * (tier - 2)
+        self._attr_native_value = default
+        self._push(default)
+
+    def _push(self, value: float) -> None:
+        self._manager.zone_thresholds[self._tier] = float(value)

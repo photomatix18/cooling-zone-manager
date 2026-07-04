@@ -99,6 +99,9 @@ class ZoneStatusSensor(_ManagerSensor):
             "max_zones": manager.max_zones,
             "overlap_seconds": manager.overlap,
             "max_run_seconds": manager.max_run,
+            "outdoor_temp": manager.outdoor_temp,
+            "temp_allowed_zones": manager.temp_allowed_zones,
+            "effective_max_zones": manager.effective_max_zones,
             "zones": {
                 zone.name: {
                     "status": manager.zone_status(zone.name),
