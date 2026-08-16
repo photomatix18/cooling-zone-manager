@@ -21,8 +21,22 @@ Same behavior as the YAML v2 automation, implemented natively:
   during the handoff) and re-seats itself with a zero-second off blink.
   Resting zones still take naturally-freed capacity immediately.
 * Lowering ``max_zones`` trims the oldest-started zones immediately.
+* Every zone carries a priority (1 runs first, 3 yields to everyone,
+  default 2, pushed by the per-zone number entities). Free capacity goes
+  to the highest-priority waiter; a runner is only max-run rotated for a
+  waiter of its own priority or better; a rested waiter with strictly
+  higher priority evicts the worst-priority runner immediately (after a
+  short minimum-run guard); sheds and trims take the worst-priority
+  zones first. With every zone at the default, all of this collapses to
+  plain round-robin.
 * Everything is re-derived from live entity states on every pass, so the
   manager self-heals after restarts, reloads, or manual switch changes.
+  The one exception is the manager's own recent commands: a template
+  switch can take ~20 s to report back, so an unconfirmed turn-on/off is
+  trusted over the observed state until it confirms or ``PENDING_GRACE``
+  expires. Without that, a reconcile pass in the lag window sees the
+  slot still empty, admits a second zone, and the over-capacity shed
+  then switches the first zone off ~50 s after it started.
 
 The manager also tracks each zone's current cycle runtime (reset when the
 zone starts a run) and the total for the current cooling session (reset when
@@ -44,7 +58,15 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, STORAGE_VERSION, TEMP_HYSTERESIS
+from .const import (
+    DEFAULT_PRIORITY,
+    DOMAIN,
+    PENDING_GRACE,
+    PRIORITY_MIN_RUN,
+    STORAGE_VERSION,
+    TEMP_HYSTERESIS,
+    TEMP_STARTUP_GRACE,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -82,9 +104,14 @@ class CoolingZoneManager:
         # tier -> outdoor temperature below which that many zones may run;
         # pushed by the threshold number entities.
         self.zone_thresholds: dict[int, float] = {}
+        # zone name -> priority (1 highest .. 3 lowest); pushed by the
+        # per-zone priority number entities. Missing zones default to 2.
+        self.zone_priorities: dict[str, int] = {}
         # Last outdoor reading and the zone count it currently allows.
         self.outdoor_temp: float | None = None
         self._temp_tier: int | None = None
+        # When the manager started; bounds the startup capacity freeze.
+        self._boot = 0.0
         # Integration version, filled in by async_setup_entry for display.
         self.version: str | None = None
 
@@ -93,10 +120,14 @@ class CoolingZoneManager:
         self._rr: list[str] = [zone.name for zone in zones]
         # zone name -> cancel callback for its wind-down timer
         self._winddown: dict[str, CALLBACK_TYPE] = {}
-        # Zones winding down early: name -> reason ("max_run" or "temp").
-        # They are not re-admitted during the overlap even though they
-        # still request.
+        # Zones winding down early: name -> reason ("max_run", "temp", or
+        # "priority"). They are not re-admitted during the overlap even
+        # though they still request.
         self._preempted: dict[str, str] = {}
+        # zone name -> ("on"/"off", commanded-at epoch): the manager's own
+        # switch commands that the switch has not confirmed yet. See the
+        # module docstring for why intent must win over observation here.
+        self._pending: dict[str, tuple[str, float]] = {}
         # zone name -> (fire-at epoch, cancel) for its max-run timer
         self._maxrun_timers: dict[str, tuple[float, CALLBACK_TYPE]] = {}
         # (fire-at epoch, cancel) for the single rest timer: a reconcile
@@ -127,6 +158,7 @@ class CoolingZoneManager:
 
     async def async_start(self) -> None:
         """Load saved state, subscribe to changes, reconcile."""
+        self._boot = dt_util.utcnow().timestamp()
         data = await self._store.async_load()
         if data:
             known = set(self._by_name)
@@ -226,12 +258,42 @@ class CoolingZoneManager:
         state = self.hass.states.get(entity_id)
         return state is not None and state.state == "on"
 
+    def _zone_on(self, name: str) -> bool:
+        """The switch state as the manager must treat it.
+
+        A pending command of the manager's own wins over the observed
+        state: the template switches confirm ~20 s late, and believing
+        "off" for a zone just commanded on admits a second zone into the
+        same slot.
+        """
+        pending = self._pending.get(name)
+        if pending is not None:
+            return pending[0] == "on"
+        return self._is_on(self._by_name[name].switch_entity)
+
+    def _prune_pending(self) -> None:
+        """Drop pending commands the switch confirmed, or that expired."""
+        now = dt_util.utcnow().timestamp()
+        for name, (intent, since) in list(self._pending.items()):
+            observed = self._is_on(self._by_name[name].switch_entity)
+            if observed == (intent == "on"):
+                del self._pending[name]
+            elif now - since > PENDING_GRACE:
+                _LOGGER.warning(
+                    "Zone '%s' switch never reported '%s' (%.0f s);"
+                    " trusting the observed state again",
+                    name,
+                    intent,
+                    now - since,
+                )
+                del self._pending[name]
+
     def get_zone(self, name: str) -> Zone:
         return self._by_name[name]
 
     @property
     def active_zones(self) -> list[str]:
-        return [z.name for z in self.zones if self._is_on(z.switch_entity)]
+        return [z.name for z in self.zones if self._zone_on(z.name)]
 
     @property
     def requesting_zones(self) -> list[str]:
@@ -287,7 +349,11 @@ class CoolingZoneManager:
         return self._is_on(self._by_name[name].request_entity)
 
     def zone_cooling(self, name: str) -> bool:
-        return self._is_on(self._by_name[name].switch_entity)
+        return self._zone_on(name)
+
+    def zone_priority(self, name: str) -> int:
+        """The zone's priority: 1 runs first, 3 yields to everyone."""
+        return int(self.zone_priorities.get(name, DEFAULT_PRIORITY))
 
     def zone_status(self, name: str) -> str:
         """One-word status: cooling, winding_down, waiting, or idle."""
@@ -378,10 +444,16 @@ class CoolingZoneManager:
         """
         temp = self._outdoor_reading()
         self.outdoor_temp = temp
-        if temp is None or not self.zone_thresholds:
-            # No sensor, sensor unavailable, or no thresholds set: the
-            # manual max applies unchanged.
+        if not self.temp_entity or not self.zone_thresholds:
             self._temp_tier = None
+            return
+        if temp is None:
+            # Sensor unreadable: keep the last known tier, so a dropout
+            # cannot jump capacity to the manual max and back (which
+            # admits extra zones and then sheds them). Before the first
+            # reading the tier stays unknown: the reconciler freezes
+            # capacity changes for TEMP_STARTUP_GRACE, after which the
+            # manual max applies — the fail-safe for a dead sensor.
             return
         current = self._temp_tier
         if current is None:
@@ -424,7 +496,8 @@ class CoolingZoneManager:
         self._notify()
 
     async def _reconcile(self) -> None:
-        on = {z.name for z in self.zones if self._is_on(z.switch_entity)}
+        self._prune_pending()
+        on = {z.name for z in self.zones if self._zone_on(z.name)}
         requesting = {z.name for z in self.zones if self._is_on(z.request_entity)}
 
         # 0) Runtime bookkeeping, derived from the same observed states.
@@ -434,6 +507,17 @@ class CoolingZoneManager:
         # lowered by the outdoor temperature.
         self._update_temp_tier()
         limit = self.effective_max_zones
+        capacity_frozen = (
+            bool(self.temp_entity)
+            and bool(self.zone_thresholds)
+            and self._temp_tier is None
+            and dt_util.utcnow().timestamp() - self._boot < TEMP_STARTUP_GRACE
+        )
+        if capacity_frozen:
+            # Startup, before the sensor's first reading: hold what is
+            # running, start nothing extra, shed nothing. The sensor's
+            # first state change (or the grace expiring) unfreezes.
+            limit = max(1, min(limit, len(on - set(self._winddown))))
 
         # 1) Clean up stale timers, and re-admit zones whose request came
         #    back during their overlap (this is the anti-short-cycle fix).
@@ -480,10 +564,16 @@ class CoolingZoneManager:
         #    may not force another zone out (its own wind-down expiry would
         #    otherwise re-seat it instantly, evicting whichever zone ran
         #    through the handoff). It can still take freed capacity below.
-        rest_check_at: float | None = None
+        #    And only a waiter of the runner's priority or better may force
+        #    it out, so a boosted zone is never rotated for a lesser one.
+        deferred: list[float] = []
+        now = dt_util.utcnow().timestamp()
+        if capacity_frozen:
+            # Re-check when the startup grace expires, in case the sensor
+            # never reports at all.
+            deferred.append(self._boot + TEMP_STARTUP_GRACE)
         if self.max_run > 0:
             winding = set(self._winddown)
-            now = dt_util.utcnow().timestamp()
             over = [
                 name
                 for name in self._rr
@@ -493,44 +583,97 @@ class CoolingZoneManager:
                 and now - self._started[name] >= self.max_run
             ]
             if over:
-                waiting: list[str] = []
-                resting: list[float] = []
-                for name in self._rr:
-                    if name in on or name not in requesting:
-                        continue
-                    rested_at = self._rested_at(name)
-                    if rested_at <= now:
-                        waiting.append(name)
-                    else:
-                        resting.append(rested_at)
-                if waiting:
-                    name = over[0]
+                rested, resting = self._waiters(on, requesting, now)
+                victim: str | None = None
+                if rested:
+                    best = min(self.zone_priority(w) for w in rested)
+                    # Worst-priority over-runner first; ties keep RR order.
+                    for name in sorted(
+                        over, key=self.zone_priority, reverse=True
+                    ):
+                        if self.zone_priority(name) >= best:
+                            victim = name
+                            break
+                if victim is not None:
                     _LOGGER.info(
                         "Zone '%s' hit max run time (%s s) with zones waiting;"
                         " rotating it out",
-                        name,
+                        victim,
                         self.max_run,
                     )
-                    self._preempted[name] = "max_run"
-                    self._schedule_winddown(name)
-                    self._rr.remove(name)
-                    self._rr.append(name)
+                    self._preempted[victim] = "max_run"
+                    self._schedule_winddown(victim)
+                    self._rr.remove(victim)
+                    self._rr.append(victim)
                     self._dirty = True
                 elif resting:
-                    # Every waiter is still resting: re-check when the
-                    # first of them has rested long enough.
-                    rest_check_at = min(resting)
-        self._update_rest_timer(rest_check_at)
+                    # Every eligible waiter is still resting: re-check when
+                    # the first of them has rested long enough.
+                    deferred.extend(at for _name, at in resting)
+
+        # 3b) Priority eviction: a rested waiter with strictly higher
+        #     priority does not wait for max_run — the worst-priority
+        #     runner is rotated out with the same overlap handoff, once it
+        #     has run PRIORITY_MIN_RUN seconds (a compressor guard, so a
+        #     boost cannot hard-cut a cycle that just started). The rest
+        #     gate applies to the evictor, preventing ping-pong. Inert
+        #     while a handoff is already in flight, and inert whenever all
+        #     priorities are equal.
+        if not self._winddown and len(on) >= limit:
+            rested, resting = self._waiters(on, requesting, now)
+            runners = [n for n in self._rr if n in on]
+            if rested:
+                best = min(self.zone_priority(w) for w in rested)
+                outranked = [
+                    n for n in runners if self.zone_priority(n) > best
+                ]
+                ready = [
+                    n
+                    for n in outranked
+                    if self._started.get(n) is not None
+                    and now - self._started[n] >= PRIORITY_MIN_RUN
+                ]
+                if ready:
+                    victim = sorted(
+                        ready, key=self.zone_priority, reverse=True
+                    )[0]
+                    _LOGGER.info(
+                        "Zone '%s' (priority %s) rotated out for a"
+                        " higher-priority waiter",
+                        victim,
+                        self.zone_priority(victim),
+                    )
+                    self._preempted[victim] = "priority"
+                    self._schedule_winddown(victim)
+                    self._rr.remove(victim)
+                    self._rr.append(victim)
+                    self._dirty = True
+                else:
+                    # Outranked runners exist but are still inside the
+                    # guard window: re-check when the first clears it.
+                    deferred.extend(
+                        self._started[n] + PRIORITY_MIN_RUN
+                        for n in outranked
+                        if self._started.get(n) is not None
+                    )
+            # A resting waiter that will outrank a runner once rested is
+            # worth a re-check at that moment.
+            for name, rested_at in resting:
+                prio = self.zone_priority(name)
+                if any(self.zone_priority(r) > prio for r in runners):
+                    deferred.append(rested_at)
+        self._update_rest_timer(min(deferred) if deferred else None)
 
         # 4) Temperature shed: when the outdoor temperature lowers the
         #    capacity below what is running, wind the excess down gracefully
-        #    (oldest-started first) instead of cutting power instantly.
+        #    (worst priority first, then oldest-started) instead of cutting
+        #    power instantly.
         if limit < self.max_zones:
             winding = set(self._winddown)
             countable = on - winding
             excess = len(countable) - limit
             if excess > 0:
-                for name in [n for n in self._rr if n in countable][:excess]:
+                for name in self._shed_order(countable)[:excess]:
                     _LOGGER.info(
                         "Outdoor temperature limits capacity to %s zone(s);"
                         " winding down zone '%s'",
@@ -546,10 +689,11 @@ class CoolingZoneManager:
         winding = set(self._winddown)
         countable = on - winding  # winding zones no longer occupy a slot
 
-        # 5) Manual capacity trim: immediate, oldest-started first.
+        # 5) Manual capacity trim: immediate, worst priority first, then
+        #    oldest-started.
         excess = len(countable) - self.max_zones
         if excess > 0:
-            for name in [n for n in self._rr if n in countable][:excess]:
+            for name in self._shed_order(countable)[:excess]:
                 _LOGGER.warning(
                     "Capacity trim: switching off zone '%s' (max_zones=%s)",
                     name,
@@ -559,11 +703,12 @@ class CoolingZoneManager:
                 countable.discard(name)
                 on.discard(name)
 
-        # 6) Start waiting zones into free capacity, round-robin order.
-        #    The winding-down zones freeing their slot early is what creates
-        #    the overlap: the replacement turns on now, the old zone turns
-        #    off when its timer fires.
-        for name in list(self._rr):
+        # 6) Start waiting zones into free capacity: highest priority
+        #    first, round-robin order within a priority (the sort is
+        #    stable). The winding-down zones freeing their slot early is
+        #    what creates the overlap: the replacement turns on now, the
+        #    old zone turns off when its timer fires.
+        for name in sorted(self._rr, key=self.zone_priority):
             effective = len(on) - len(winding)
             if (
                 name not in on
@@ -651,6 +796,36 @@ class CoolingZoneManager:
             if state is not None and state.state == "off":
                 del self._restored_started[name]
 
+    # ------------------------------------------------------ waiter helpers
+
+    def _waiters(
+        self, on: set[str], requesting: set[str], now: float
+    ) -> tuple[list[str], list[tuple[str, float]]]:
+        """Waiting zones in RR order, split by the rest gate.
+
+        Returns rested waiter names, and (name, rested-at) pairs for the
+        ones still resting after their last run.
+        """
+        rested: list[str] = []
+        resting: list[tuple[str, float]] = []
+        for name in self._rr:
+            if name in on or name not in requesting:
+                continue
+            rested_at = self._rested_at(name)
+            if rested_at <= now:
+                rested.append(name)
+            else:
+                resting.append((name, rested_at))
+        return rested, resting
+
+    def _shed_order(self, countable: set[str]) -> list[str]:
+        """Shed/trim victims: worst priority first, oldest-started within."""
+        return sorted(
+            (n for n in self._rr if n in countable),
+            key=self.zone_priority,
+            reverse=True,
+        )
+
     # ------------------------------------------------------------ rest gate
 
     def _rested_at(self, name: str) -> float:
@@ -682,7 +857,7 @@ class CoolingZoneManager:
 
         now = dt_util.utcnow().timestamp()
         _LOGGER.info(
-            "Max-run rotation deferred: all waiting zones are resting;"
+            "Rotation deferred (waiters resting or eviction guard);"
             " re-checking in %.0f s",
             fire_at - now,
         )
@@ -752,7 +927,7 @@ class CoolingZoneManager:
             # Only switch off if the request is still gone. If it came back
             # in a race, the zone keeps running. Preempted zones switch off
             # regardless: their request never left, but their turn is over.
-            if self._is_on(zone.switch_entity) and (
+            if self._zone_on(name) and (
                 preempted or not self._is_on(zone.request_entity)
             ):
                 _LOGGER.info("Zone '%s' overlap expired; switching off", name)
@@ -770,6 +945,7 @@ class CoolingZoneManager:
             {"entity_id": self._by_name[name].switch_entity},
             blocking=True,
         )
+        self._pending[name] = ("on", dt_util.utcnow().timestamp())
 
     async def _turn_off(self, name: str) -> None:
         await self.hass.services.async_call(
@@ -778,6 +954,7 @@ class CoolingZoneManager:
             {"entity_id": self._by_name[name].switch_entity},
             blocking=True,
         )
+        self._pending[name] = ("off", dt_util.utcnow().timestamp())
 
     async def _save_state(self) -> None:
         await self._store.async_save(

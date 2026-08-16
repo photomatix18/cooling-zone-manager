@@ -8,7 +8,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import DEFAULT_PRIORITY, DOMAIN, PRIORITY_MAX, PRIORITY_MIN
 from .manager import CoolingZoneManager
 
 
@@ -24,6 +24,8 @@ async def async_setup_entry(
         OverlapNumber(manager, entry),
         MaxRunNumber(manager, entry),
     ]
+    for zone in manager.zones:
+        entities.append(ZonePriorityNumber(manager, entry, zone.name))
     # Temperature-aware capacity: one threshold per zone beyond the first,
     # only when an outdoor temperature sensor was configured.
     if manager.temp_entity:
@@ -137,6 +139,32 @@ class MaxRunNumber(_ManagerNumber):
 
     def _push(self, value: float) -> None:
         self._manager.max_run = int(value) * 60
+
+
+class ZonePriorityNumber(_ManagerNumber):
+    """The zone's priority: 1 runs first, 3 yields to everyone.
+
+    Meant to be driven by automations (bedtime, cooking, movie night) or
+    a dashboard card; the manager just obeys the current values.
+    """
+
+    _attr_icon = "mdi:priority-high"
+    _attr_native_min_value = PRIORITY_MIN
+    _attr_native_max_value = PRIORITY_MAX
+    _attr_native_step = 1
+
+    def __init__(
+        self, manager: CoolingZoneManager, entry: ConfigEntry, zone_name: str
+    ) -> None:
+        super().__init__(manager, entry)
+        self._zone_name = zone_name
+        self._attr_unique_id = f"{entry.entry_id}_priority_{zone_name}"
+        self._attr_name = f"{zone_name} priority"
+        self._attr_native_value = DEFAULT_PRIORITY
+        self._push(DEFAULT_PRIORITY)
+
+    def _push(self, value: float) -> None:
+        self._manager.zone_priorities[self._zone_name] = int(value)
 
 
 class ZoneThresholdNumber(_ManagerNumber):

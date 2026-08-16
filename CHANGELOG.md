@@ -2,6 +2,60 @@
 
 All notable changes to the Cooling Zone Manager integration are documented here.
 
+## 1.5.0 — 2026-08-16
+
+### Fixed
+
+- **Zones no longer blink on and then off when a slot changes hands.** The
+  cooling switches (template switches backed by a thermostat over HomeKit)
+  can take ~20 seconds to report a state change back. The reconciler trusted
+  the observed state, so a pass that ran inside that window saw the slot it
+  had just filled as still empty, admitted a *second* zone into it, and the
+  over-capacity shed then switched the first zone off ~50 seconds after it
+  started — consuming its round-robin turn, so it went to the back of the
+  queue and waited out a full rotation. In a 3-zone install this happened
+  several times a day, worst at night when every zone was requesting.
+
+  The manager now remembers its own unconfirmed turn-on/off commands and
+  trusts them over the observed switch state until the switch confirms or
+  60 seconds pass (then it logs a warning and the observed state rules
+  again, so self-healing after manual flips and restarts is unchanged).
+  This also stops phantom 0-second cycles from polluting the cycle-runtime
+  sensors and the rest gate.
+
+- **No more zone blinks on restart.** The first reconcile after a restart
+  could run before the outdoor temperature sensor's integration had loaded,
+  so capacity briefly fell back to the manual max, every requesting zone
+  started, and the sensor's first reading seconds later shed the extras.
+  Now, until a configured sensor delivers its first reading (up to 5
+  minutes), capacity changes are frozen: running zones keep running,
+  nothing extra starts, nothing is shed — from idle, one zone may still
+  begin cooling. If the sensor stays silent past the grace, the manual Max
+  zones applies as before. A mid-season sensor dropout now also keeps the
+  last known limit instead of snapping to full capacity and back.
+
+### Added
+
+- **Zone priorities.** Each zone gets a **priority** number entity: `1` runs
+  first, `3` yields to everyone, default `2`. Set them from automations
+  (bedtime, cooking, movie night), a dashboard card, or voice — the manager
+  just obeys the current values:
+  - Free capacity goes to the highest-priority waiter first; round-robin
+    order breaks ties.
+  - A runner is only max-run rotated for a waiter of its own priority or
+    better — a boosted zone runs as long as it wants while lesser zones
+    share the leftover capacity.
+  - A rested waiter with *strictly higher* priority doesn't wait for the
+    max-run rotation: the worst-priority runner is wound down with the
+    normal overlap handoff once it has run at least 5 minutes (a compressor
+    guard so a boost can't hard-cut a fresh cycle).
+  - Temperature sheds and capacity trims take the worst-priority zones
+    first.
+  - The Active zones sensor and each per-zone status sensor expose the
+    current priority.
+
+  With every zone left at `2` the scheduler behaves exactly as 1.4.2 did.
+
 ## 1.4.2 — 2026-07-03
 
 ### Fixed

@@ -106,6 +106,7 @@ class ZoneStatusSensor(_ManagerSensor):
             "zones": {
                 zone.name: {
                     "status": manager.zone_status(zone.name),
+                    "priority": manager.zone_priority(zone.name),
                     "requesting": manager.zone_requesting(zone.name),
                     "cooling": manager.zone_cooling(zone.name),
                     "cycle_runtime_seconds": round(
@@ -153,6 +154,7 @@ class ZoneDetailSensor(_ManagerSensor):
             "request_on": manager.zone_requesting(name),
             "switch_entity": zone.switch_entity,
             "cooling_on": manager.zone_cooling(name),
+            "priority": manager.zone_priority(name),
             "preempted": name in manager.preempted_zones,
             "started_at": started.isoformat() if started else None,
             "cycle_runtime_seconds": round(manager.zone_cycle_runtime(name)),

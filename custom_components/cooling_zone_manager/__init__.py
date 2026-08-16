@@ -79,6 +79,7 @@ def _async_cleanup_orphans(
     for zone in manager.zones:
         expected.add(f"{entry.entry_id}_zone_{zone.name}_status")
         expected.add(f"{entry.entry_id}_zone_{zone.name}_runtime")
+        expected.add(f"{entry.entry_id}_priority_{zone.name}")
     if manager.temp_entity:
         for tier in range(2, len(manager.zones) + 1):
             expected.add(f"{entry.entry_id}_threshold_{tier}")

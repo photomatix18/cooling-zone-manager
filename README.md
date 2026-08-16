@@ -13,6 +13,7 @@ A custom Home Assistant integration that lets **at most N cooling zones run at t
 - When a zone's request turns off, the next waiting zone starts **immediately**, and the old zone keeps running for the **overlap time** before shutting off (a smooth handoff).
 - If the old zone's request comes back during the overlap, it just keeps running — no short-cycling.
 - If a zone has been cooling longer than the **max zone run time** while other zones are waiting, it gets rotated out (same smooth handoff) and goes to the back of the queue — one stubborn zone can't hog the capacity. Set it to `0` to disable.
+- Every zone has a **priority** (1 = first, 3 = last, default 2) you can change live from automations or a dashboard — boost the bedrooms at night or the kitchen while cooking. See below.
 - Lowering **Max zones** trims the oldest-running zones immediately.
 - Optionally, an **outdoor temperature sensor** scales the capacity automatically — e.g. only 1 zone above 85°, 2 below 85°, all 3 below 75° — with hysteresis so a hovering reading doesn't flap zones. See below.
 - **Runtime is tracked** per cycle: each zone shows how long its current run has been cooling, and a session total accumulates across zones until everything is satisfied — then the next request starts a fresh session. Survives restarts.
@@ -27,6 +28,7 @@ One device ("Cooling Zone Manager") showing the installed **version**, with thes
 | `number.cooling_zone_manager_max_zones` | Max zones allowed at once — change it any time |
 | `number.cooling_zone_manager_overlap_time` | Overlap / wind-down time in seconds |
 | `number.cooling_zone_manager_max_zone_run_time` | Longest a zone may cool while others wait, in minutes (`0` = no limit) |
+| `number.cooling_zone_manager_<zone>_priority` | One per zone: the zone's priority, `1`–`3` (see **Zone priorities** below) |
 | `sensor.cooling_zone_manager_active_zones` | How many zones are cooling now; attributes show active / requesting / winding-down / waiting / preempted zones, the round-robin order, a per-zone detail map, and the version |
 | `sensor.cooling_zone_manager_<zone>_status` | One per zone: `cooling`, `winding_down`, `waiting`, or `idle`, with the request state, actual switch state, and cycle runtime as attributes |
 | `sensor.cooling_zone_manager_<zone>_runtime` | One per zone: how long the **current run** has been cooling. Resets when the zone starts; holds the last run's duration while off (`running` attribute says which) |
@@ -50,7 +52,7 @@ Details that keep it smooth:
 
 - **Hysteresis (1°):** the reading must cross a threshold by a full degree before capacity changes, so 84.9° → 85.1° → 84.9° doesn't flap zones on and off.
 - **Graceful shedding:** when a rising temperature lowers the capacity below what's running, the excess zones (oldest first) wind down through the normal overlap instead of being switched off instantly, and go to the back of the round-robin queue.
-- **Fail-safe:** if the sensor goes unavailable, the manual Max zones applies unchanged.
+- **Fail-safe:** if the sensor drops out mid-season, the last known limit stays in force. Right after a restart, before the sensor's first reading, capacity changes are frozen (running zones keep running, nothing extra starts, nothing is shed); if no reading arrives within 5 minutes, the manual Max zones applies unchanged.
 - The Active zones sensor shows `outdoor_temp`, `temp_allowed_zones`, and `effective_max_zones` attributes so you can always see why the manager chose its current limit.
 
 ## Max zone run time (fairness limit)
@@ -63,6 +65,40 @@ Sometimes one zone can't reach its setpoint — an oversized room, a heat wave, 
 - If **no** zone is waiting, nothing happens — the zone keeps cooling as long as it needs. The limit only enforces fairness; it never wastes free capacity.
 
 Set it to `0` (the default) to disable the limit entirely.
+
+## Zone priorities
+
+Each zone gets a priority number entity: **1 runs first, 3 yields to everyone, default 2.** The integration never changes them itself — drive them from automations (bedtime, cooking, movie night), a dashboard card, or voice, with `number.set_value`. The rules:
+
+- **Free capacity goes to the highest-priority waiter first.** Round-robin order breaks ties, so zones at equal priority share exactly as before.
+- **A runner is only max-run rotated for a waiter of its own priority or better.** Boost the bedrooms to `1` at night and they cool as long as they like, while the priority-2 zones rotate through whatever capacity is left.
+- **A rested waiter with strictly higher priority doesn't wait for max-run.** The worst-priority runner is wound down with the normal overlap handoff as soon as it has run at least 5 minutes — the guard keeps a priority boost from hard-cutting a compressor cycle that just started.
+- **Temperature sheds and capacity trims switch off the worst-priority zones first**, oldest-started breaking ties.
+- The Active zones sensor and each zone's status sensor show the current priorities, so you can always see why the manager chose what it chose.
+
+With every zone left at `2`, all of this collapses to plain round-robin — the feature is inert until an automation touches it.
+
+Example — prioritize the bedrooms while sleeping:
+
+```yaml
+automation:
+  - alias: "Bedrooms cool first at night"
+    triggers:
+      - trigger: time
+        at: "21:30:00"
+    actions:
+      - action: number.set_value
+        target: {entity_id: number.cooling_zone_manager_bedrooms_priority}
+        data: {value: 1}
+  - alias: "Bedrooms back to normal in the morning"
+    triggers:
+      - trigger: time
+        at: "08:00:00"
+    actions:
+      - action: number.set_value
+        target: {entity_id: number.cooling_zone_manager_bedrooms_priority}
+        data: {value: 2}
+```
 
 ---
 
