@@ -20,6 +20,10 @@ Same behavior as the YAML v2 automation, implemented natively:
   waiter instantly evicts the other long-runner (whose clock never reset
   during the handoff) and re-seats itself with a zero-second off blink.
   Resting zones still take naturally-freed capacity immediately.
+* A global compressor cooldown: once every zone is off, nothing may start
+  again until ``cooldown`` seconds have passed since the last zone switched
+  off. Handoffs are unaffected — while any zone is still on (winding down
+  included) the compressor never stopped. 0 disables it.
 * Lowering ``max_zones`` trims the oldest-started zones immediately.
 * Every zone carries a priority (1 runs first, 3 yields to everyone,
   default 2, pushed by the per-zone number entities). Free capacity goes
@@ -92,6 +96,7 @@ class CoolingZoneManager:
         overlap: int,
         max_run: int = 0,
         temp_entity: str | None = None,
+        cooldown: int = 0,
     ) -> None:
         self.hass = hass
         self.zones = zones
@@ -99,6 +104,9 @@ class CoolingZoneManager:
         self.overlap = int(overlap)
         # Longest a zone may run while others wait; 0 disables the limit.
         self.max_run = int(max_run)
+        # Minimum compressor off time (seconds) after the last zone stops
+        # before anything may start again; 0 disables it.
+        self.cooldown = int(cooldown)
         # Optional outdoor temperature sensor for temperature-aware capacity.
         self.temp_entity = temp_entity
         # tier -> outdoor temperature below which that many zones may run;
@@ -118,8 +126,8 @@ class CoolingZoneManager:
         self._by_name = {zone.name: zone for zone in zones}
         # Round-robin order, least recently started first.
         self._rr: list[str] = [zone.name for zone in zones]
-        # zone name -> cancel callback for its wind-down timer
-        self._winddown: dict[str, CALLBACK_TYPE] = {}
+        # zone name -> (fire-at epoch, cancel) for its wind-down timer
+        self._winddown: dict[str, tuple[float, CALLBACK_TYPE]] = {}
         # Zones winding down early: name -> reason ("max_run", "temp", or
         # "priority"). They are not re-admitted during the overlap even
         # though they still request.
@@ -219,7 +227,7 @@ class CoolingZoneManager:
         if self._unsub_start is not None:
             self._unsub_start()
             self._unsub_start = None
-        for cancel in self._winddown.values():
+        for _fire_at, cancel in self._winddown.values():
             cancel()
         self._winddown.clear()
         for _fire_at, cancel in self._maxrun_timers.values():
@@ -356,12 +364,14 @@ class CoolingZoneManager:
         return int(self.zone_priorities.get(name, DEFAULT_PRIORITY))
 
     def zone_status(self, name: str) -> str:
-        """One-word status: cooling, winding_down, waiting, or idle."""
+        """One-word status: cooling, winding_down, cooldown, waiting, idle."""
         if name in self._winddown:
             return "winding_down"
         if self.zone_cooling(name):
             return "cooling"
         if self.zone_requesting(name):
+            if self._cooldown_until_ts() is not None:
+                return "cooldown"
             return "waiting"
         return "idle"
 
@@ -411,6 +421,155 @@ class CoolingZoneManager:
         if self._session_started is None:
             return None
         return dt_util.utc_from_timestamp(self._session_started)
+
+    # --------------------------------------------------- countdown visibility
+
+    def _cooldown_until_ts(self) -> float | None:
+        """Epoch when the compressor cooldown ends, or None if inactive."""
+        if self.cooldown <= 0 or not self._last_run_end:
+            return None
+        if any(self._zone_on(z.name) for z in self.zones):
+            return None  # compressor still running, no cooldown in force
+        until = max(self._last_run_end.values()) + self.cooldown
+        if until <= dt_util.utcnow().timestamp():
+            return None
+        return until
+
+    @property
+    def cooldown_until(self) -> datetime | None:
+        """When the compressor cooldown ends, or None if none is running."""
+        until = self._cooldown_until_ts()
+        if until is None:
+            return None
+        return dt_util.utc_from_timestamp(until)
+
+    @property
+    def last_compressor_off(self) -> datetime | None:
+        """When the last zone switched off, while everything is off."""
+        if not self._last_run_end:
+            return None
+        if any(self._zone_on(z.name) for z in self.zones):
+            return None
+        return dt_util.utc_from_timestamp(max(self._last_run_end.values()))
+
+    def zone_winddown_until(self, name: str) -> datetime | None:
+        """When the zone's wind-down expires and it switches off."""
+        entry = self._winddown.get(name)
+        if entry is None:
+            return None
+        return dt_util.utc_from_timestamp(entry[0])
+
+    def zone_resting_until(self, name: str) -> datetime | None:
+        """When the zone's rest gate opens, while it waits rested-out."""
+        if self.max_run <= 0:
+            return None
+        if self._zone_on(name) or not self.zone_requesting(name):
+            return None
+        rested_at = self._rested_at(name)
+        if rested_at <= dt_util.utcnow().timestamp():
+            return None
+        return dt_util.utc_from_timestamp(rested_at)
+
+    def zone_countdown(self, name: str) -> tuple[datetime, str] | None:
+        """The zone's next scheduled transition, for UI countdowns.
+
+        Returns (when, why) or None when nothing is pending. The reasons:
+
+        * ``switching_off`` — winding down; when the switch turns off.
+        * ``priority_eviction`` — running; a rested higher-priority waiter
+          takes this slot once the compressor guard clears.
+        * ``max_run_rotation`` — running; the max-run limit rotates this
+          zone out then (an eligible waiter exists).
+        * ``compressor_cooldown`` — waiting; the global cooldown ends then.
+        * ``resting`` — waiting; its own rest gate opens then.
+        * ``waits_for_guard`` — waiting; it evicts a lower-priority runner
+          the moment that runner clears the compressor guard.
+        * ``waits_for_rotation`` — waiting; a runner reaches its max-run
+          limit then and this zone is in line for the slot.
+
+        These are the manager's own timers, published so a zone that looks
+        stuck always shows when and why it will move.
+        """
+        now = dt_util.utcnow().timestamp()
+        entry = self._winddown.get(name)
+        if entry is not None:
+            return dt_util.utc_from_timestamp(entry[0]), "switching_off"
+
+        on = {z.name for z in self.zones if self._zone_on(z.name)}
+        requesting = {
+            z.name for z in self.zones if self._is_on(z.request_entity)
+        }
+        limit = self.effective_max_zones
+        prio = self.zone_priority
+
+        if name in on:
+            start = self._started.get(name)
+            if start is None or len(on) < limit:
+                return None
+            rested, resting = self._waiters(on, requesting, now)
+            # A rested higher-priority waiter is poised to take this slot
+            # the moment the compressor guard clears — but only the
+            # worst-priority runner is the victim.
+            guard_end = start + PRIORITY_MIN_RUN
+            runners = [r for r in self._rr if r in on and r not in self._winddown]
+            if rested and guard_end > now and runners:
+                best = min(prio(w) for w in rested)
+                worst = max(prio(r) for r in runners)
+                if prio(name) > best and prio(name) == worst:
+                    return dt_util.utc_from_timestamp(guard_end), "priority_eviction"
+            if self.max_run > 0:
+                waiters = rested + [w for w, _at in resting]
+                if any(prio(w) <= prio(name) for w in waiters):
+                    due = start + self.max_run
+                    if due > now:
+                        return dt_util.utc_from_timestamp(due), "max_run_rotation"
+                    # Overdue: the rotation waits on the first eligible
+                    # waiter to finish resting.
+                    opens = [
+                        at
+                        for w, at in resting
+                        if prio(w) <= prio(name) and at > now
+                    ]
+                    if opens and not any(prio(w) <= prio(name) for w in rested):
+                        return (
+                            dt_util.utc_from_timestamp(min(opens)),
+                            "max_run_rotation",
+                        )
+            return None
+
+        if name not in requesting:
+            return None
+
+        cooldown = self._cooldown_until_ts()
+        if cooldown is not None:
+            return dt_util.utc_from_timestamp(cooldown), "compressor_cooldown"
+        rested_at = self._rested_at(name) if self.max_run > 0 else 0.0
+        if rested_at > now:
+            return dt_util.utc_from_timestamp(rested_at), "resting"
+        runners = [r for r in self._rr if r in on and r not in self._winddown]
+        if not runners or len(on) < limit:
+            return None
+        # This waiter outranks a runner: it starts when the first outranked
+        # runner clears the compressor guard (if one is already clear, the
+        # eviction is imminent and there is nothing to count down).
+        outranked_ends = [
+            self._started[r] + PRIORITY_MIN_RUN
+            for r in runners
+            if prio(r) > prio(name) and self._started.get(r) is not None
+        ]
+        if outranked_ends and all(end > now for end in outranked_ends):
+            return dt_util.utc_from_timestamp(min(outranked_ends)), "waits_for_guard"
+        # Otherwise it waits for a max-run rotation of an eligible runner.
+        if self.max_run > 0 and not outranked_ends:
+            dues = [
+                self._started[r] + self.max_run
+                for r in runners
+                if prio(r) >= prio(name) and self._started.get(r) is not None
+            ]
+            future = min((due for due in dues if due > now), default=None)
+            if future is not None:
+                return dt_util.utc_from_timestamp(future), "waits_for_rotation"
+        return None
 
     # ------------------------------------------------- temperature capacity
 
@@ -566,19 +725,21 @@ class CoolingZoneManager:
         #    through the handoff). It can still take freed capacity below.
         #    And only a waiter of the runner's priority or better may force
         #    it out, so a boosted zone is never rotated for a lesser one.
+        #    Rotation only happens when the waiter has no free slot to take:
+        #    with capacity to spare it simply starts below and the runner
+        #    keeps cooling (otherwise the runner would be wound down and
+        #    then blink back on, since nothing else wanted its slot).
         deferred: list[float] = []
         now = dt_util.utcnow().timestamp()
         if capacity_frozen:
             # Re-check when the startup grace expires, in case the sensor
             # never reports at all.
             deferred.append(self._boot + TEMP_STARTUP_GRACE)
-        if self.max_run > 0:
-            winding = set(self._winddown)
+        if self.max_run > 0 and not self._winddown and len(on) >= limit:
             over = [
                 name
                 for name in self._rr
                 if name in on
-                and name not in winding
                 and self._started.get(name) is not None
                 and now - self._started[name] >= self.max_run
             ]
@@ -662,7 +823,6 @@ class CoolingZoneManager:
                 prio = self.zone_priority(name)
                 if any(self.zone_priority(r) > prio for r in runners):
                     deferred.append(rested_at)
-        self._update_rest_timer(min(deferred) if deferred else None)
 
         # 4) Temperature shed: when the outdoor temperature lowers the
         #    capacity below what is running, wind the excess down gracefully
@@ -703,39 +863,62 @@ class CoolingZoneManager:
                 countable.discard(name)
                 on.discard(name)
 
-        # 6) Start waiting zones into free capacity: highest priority
+        # 6) Global compressor cooldown: once every zone is off, the
+        #    compressor must stay off for the minimum off time before
+        #    anything may start again. Handoffs are unaffected — while any
+        #    zone is on (winding down included) the compressor never
+        #    stopped, so this gate only exists when ``on`` is empty.
+        now = dt_util.utcnow().timestamp()
+        cooldown_block: float | None = None
+        if self.cooldown > 0 and not on and self._last_run_end:
+            until = max(self._last_run_end.values()) + self.cooldown
+            if until > now:
+                cooldown_block = until
+
+        # 7) Start waiting zones into free capacity: highest priority
         #    first, round-robin order within a priority (the sort is
         #    stable). The winding-down zones freeing their slot early is
         #    what creates the overlap: the replacement turns on now, the
         #    old zone turns off when its timer fires.
-        for name in sorted(self._rr, key=self.zone_priority):
-            effective = len(on) - len(winding)
-            if (
-                name not in on
-                and name in requesting
-                and effective < limit
-                # At most one zone of handoff surplus at a time; matches the
-                # original automation's behavior.
-                and len(on) < limit + 1
-            ):
-                self._rr.remove(name)
-                self._rr.append(name)
-                self._dirty = True
-                _LOGGER.info(
-                    "Starting zone '%s' | round-robin order now: %s",
-                    name,
-                    self._rr,
+        if cooldown_block is not None:
+            if requesting:
+                deferred.append(cooldown_block)
+                _LOGGER.debug(
+                    "Compressor cooldown: %.0f s before a zone may start",
+                    cooldown_block - now,
                 )
-                await self._turn_on(name)
-                on.add(name)
-                # Record the start now rather than waiting for the switch's
-                # state-change event, so runtime tracking and the max-run
-                # timer are already correct in this same pass.
-                self._started.setdefault(name, dt_util.utcnow().timestamp())
+        else:
+            for name in sorted(self._rr, key=self.zone_priority):
+                effective = len(on) - len(winding)
+                if (
+                    name not in on
+                    and name in requesting
+                    and effective < limit
+                    # At most one zone of handoff surplus at a time; matches
+                    # the original automation's behavior.
+                    and len(on) < limit + 1
+                ):
+                    self._rr.remove(name)
+                    self._rr.append(name)
+                    self._dirty = True
+                    _LOGGER.info(
+                        "Starting zone '%s' | round-robin order now: %s",
+                        name,
+                        self._rr,
+                    )
+                    await self._turn_on(name)
+                    on.add(name)
+                    # Record the start now rather than waiting for the
+                    # switch's state-change event, so runtime tracking and
+                    # the max-run timer are already correct in this pass.
+                    self._started.setdefault(name, dt_util.utcnow().timestamp())
 
-        # 7) Keep a timer on every running zone so a reconcile pass fires
-        #    the moment it crosses the max-run threshold.
+        # 8) Keep a timer on every running zone so a reconcile pass fires
+        #    the moment it crosses the max-run threshold, and one for the
+        #    earliest deferred re-check (rest gate, eviction guard, startup
+        #    grace, or cooldown expiry).
         self._update_maxrun_timers(on)
+        self._update_rest_timer(min(deferred) if deferred else None)
 
         if self._dirty:
             self._dirty = False
@@ -857,8 +1040,8 @@ class CoolingZoneManager:
 
         now = dt_util.utcnow().timestamp()
         _LOGGER.info(
-            "Rotation deferred (waiters resting or eviction guard);"
-            " re-checking in %.0f s",
+            "Re-check scheduled in %.0f s (rest gate, eviction guard,"
+            " startup grace, or compressor cooldown)",
             fire_at - now,
         )
         self._rest_timer = (
@@ -911,12 +1094,16 @@ class CoolingZoneManager:
             self.hass.async_create_task(self._winddown_expired(name))
 
         self._cancel_winddown(name)
-        self._winddown[name] = async_call_later(self.hass, self.overlap, _expired)
+        fire_at = dt_util.utcnow().timestamp() + self.overlap
+        self._winddown[name] = (
+            fire_at,
+            async_call_later(self.hass, self.overlap, _expired),
+        )
 
     def _cancel_winddown(self, name: str) -> None:
-        cancel = self._winddown.pop(name, None)
-        if cancel is not None:
-            cancel()
+        entry = self._winddown.pop(name, None)
+        if entry is not None:
+            entry[1]()
 
     async def _winddown_expired(self, name: str) -> None:
         async with self._lock:

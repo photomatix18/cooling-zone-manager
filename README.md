@@ -12,7 +12,9 @@ A custom Home Assistant integration that lets **at most N cooling zones run at t
 - Fairness is **round-robin**: when there are more requests than slots, the zone that has waited longest gets the next free slot.
 - When a zone's request turns off, the next waiting zone starts **immediately**, and the old zone keeps running for the **overlap time** before shutting off (a smooth handoff).
 - If the old zone's request comes back during the overlap, it just keeps running — no short-cycling.
-- If a zone has been cooling longer than the **max zone run time** while other zones are waiting, it gets rotated out (same smooth handoff) and goes to the back of the queue — one stubborn zone can't hog the capacity. Set it to `0` to disable.
+- If a zone has been cooling longer than the **max zone run time** while other zones are waiting *and no free slot exists*, it gets rotated out (same smooth handoff) and goes to the back of the queue — one stubborn zone can't hog the capacity. Set it to `0` to disable.
+- A **compressor cooldown**: once every zone is off, no zone may start again until the minimum off time has passed — the compressor can never stop and immediately restart. Handoffs are unaffected (the compressor never stops during one). Set it to `0` to disable. See below.
+- **Every delay is visible.** Wind-downs, the cooldown, rest gates, and pending rotations all show as live countdown sensors, so a zone that's waiting never looks stuck. See **Watching it work**.
 - Every zone has a **priority** (1 = first, 3 = last, default 2) you can change live from automations or a dashboard — boost the bedrooms at night or the kitchen while cooking. See below.
 - Lowering **Max zones** trims the oldest-running zones immediately.
 - Optionally, an **outdoor temperature sensor** scales the capacity automatically — e.g. only 1 zone above 85°, 2 below 85°, all 3 below 75° — with hysteresis so a hovering reading doesn't flap zones. See below.
@@ -28,9 +30,12 @@ One device ("Cooling Zone Manager") showing the installed **version**, with thes
 | `number.cooling_zone_manager_max_zones` | Max zones allowed at once — change it any time |
 | `number.cooling_zone_manager_overlap_time` | Overlap / wind-down time in seconds |
 | `number.cooling_zone_manager_max_zone_run_time` | Longest a zone may cool while others wait, in minutes (`0` = no limit) |
+| `number.cooling_zone_manager_compressor_cooldown` | Minimum compressor off time in minutes once every zone is off (`0` = off, default `5`) |
 | `number.cooling_zone_manager_<zone>_priority` | One per zone: the zone's priority, `1`–`3` (see **Zone priorities** below) |
-| `sensor.cooling_zone_manager_active_zones` | How many zones are cooling now; attributes show active / requesting / winding-down / waiting / preempted zones, the round-robin order, a per-zone detail map, and the version |
-| `sensor.cooling_zone_manager_<zone>_status` | One per zone: `cooling`, `winding_down`, `waiting`, or `idle`, with the request state, actual switch state, and cycle runtime as attributes |
+| `sensor.cooling_zone_manager_active_zones` | How many zones are cooling now; attributes show active / requesting / winding-down / waiting / preempted zones, the round-robin order, the cooldown, a per-zone detail map, and the version |
+| `sensor.cooling_zone_manager_cooldown_ends` | When the compressor cooldown ends — a live countdown while it runs, `unknown` otherwise |
+| `sensor.cooling_zone_manager_<zone>_status` | One per zone: `cooling`, `winding_down`, `cooldown`, `waiting`, or `idle`, with the request state, actual switch state, cycle runtime, and every pending countdown as attributes |
+| `sensor.cooling_zone_manager_<zone>_countdown` | One per zone: the zone's next scheduled transition as a live countdown, with a `countdown_type` attribute naming it (see **Watching it work**) |
 | `sensor.cooling_zone_manager_<zone>_runtime` | One per zone: how long the **current run** has been cooling. Resets when the zone starts; holds the last run's duration while off (`running` attribute says which) |
 | `sensor.cooling_zone_manager_total_runtime` | Cooling time across all zones for the **current session**. Resets when a zone requests again after everything was satisfied |
 | `number.cooling_zone_manager_allow_2_zones_below` etc. | Only when an outdoor temperature sensor is configured: one threshold per zone beyond the first (see below) |
@@ -65,6 +70,19 @@ Sometimes one zone can't reach its setpoint — an oversized room, a heat wave, 
 - If **no** zone is waiting, nothing happens — the zone keeps cooling as long as it needs. The limit only enforces fairness; it never wastes free capacity.
 
 Set it to `0` (the default) to disable the limit entirely.
+
+## Compressor cooldown (anti-short-cycle)
+
+Rotating zone to zone never stops the compressor — the overlap handoff keeps at least one zone running through every exchange. The risky moment is when **everything** shuts off and a request arrives seconds later: without protection the compressor would stop and immediately restart, which is what wears it out.
+
+The **Compressor cooldown** number (minutes, default `5`, `0` = off) closes that gap: once the last zone switches off, no zone may start again until the cooldown has passed. What to expect:
+
+- A request arriving during the cooldown just waits — the zone's status shows **`cooldown`** and the **Cooldown ends** sensor counts down to the exact moment it will start. The start fires automatically the second the cooldown expires.
+- Handoffs, rotations, and priority evictions are never delayed by it, because the compressor never stopped during those.
+- It survives restarts: the off-time is persisted, so rebooting Home Assistant right after the system goes quiet doesn't lose the cooldown.
+- It only governs what **this manager starts**. Flipping a zone switch on by hand during the cooldown is taken as a deliberate override and is left alone.
+
+When a heating manager entry exists someday, it gets its own independent cooldown knob — cooling and heating can differ, or either can be `0`.
 
 ## Zone priorities
 
@@ -147,7 +165,7 @@ HACS installs integrations from GitHub repositories, so this repo needs to live 
 ## Configuration
 
 1. Go to **Settings → Devices & Services → + Add Integration** and search for **Cooling Zone Manager**.
-2. First screen: pick a name, the max zones (e.g. `2`), overlap seconds (e.g. `15`), max zone run time in minutes (e.g. `60` for 1 hour, or `0` for no limit), and optionally an outdoor temperature sensor for temperature-aware capacity.
+2. First screen: pick a name, the max zones (e.g. `2`), overlap seconds (e.g. `15`), max zone run time in minutes (e.g. `60` for 1 hour, or `0` for no limit), the compressor cooldown in minutes (e.g. `5`, or `0` for none), and optionally an outdoor temperature sensor for temperature-aware capacity.
 3. Then add each zone one at a time. Example for a three-zone setup:
 
    | Zone name | Request entity | Cooling switch |
@@ -163,6 +181,24 @@ HACS installs integrations from GitHub repositories, so this repo needs to live 
 
 ## Watching it work
 
+**Every delay the manager imposes is visible as a countdown** — if a zone looks stuck, some sensor says exactly when and why it will move:
+
+- The **Cooldown ends** sensor counts down the compressor cooldown.
+- Each zone's **countdown** sensor shows its next scheduled transition; the `countdown_type` attribute names it:
+
+  | `countdown_type` | The zone is… |
+  |---|---|
+  | `switching_off` | winding down; this is when its switch turns off |
+  | `compressor_cooldown` | waiting for the global cooldown to end |
+  | `resting` | waiting out its own rest gate (see **Max zone run time**) |
+  | `priority_eviction` | running, but a higher-priority zone takes this slot when the 5-minute compressor guard clears |
+  | `waits_for_guard` | waiting to evict a lower-priority runner once that runner clears the guard |
+  | `max_run_rotation` | running; the max-run limit rotates it out then |
+  | `waits_for_rotation` | waiting; a runner reaches its max-run limit then |
+
+  Timestamp sensors render as live countdowns ("in 4 minutes") on dashboard cards, and `unknown` means nothing is pending.
+- The per-zone status sensors carry the same information as `winddown_until`, `resting_until`, `countdown`, and `countdown_type` attributes.
+
 The status sensor's attributes show live state. For a play-by-play in the log, add this to `configuration.yaml` and restart:
 
 ```yaml
@@ -175,7 +211,7 @@ Every start, wind-down, re-admit, and shutoff is then logged under Settings → 
 
 ## Changing things later
 
-- **Max zones / overlap / max run time / temperature thresholds:** change the number entities any time (dashboard, automations, voice — anything that can set a number).
+- **Max zones / overlap / max run time / compressor cooldown / temperature thresholds:** change the number entities any time (dashboard, automations, voice — anything that can set a number).
 - **Add or remove zones, or change the outdoor temperature sensor:** Settings → Devices & Services → Cooling Zone Manager → **Configure**. Changes apply immediately; removed zones are switched off first if they're cooling. (Renaming a zone = remove it, then add it with the new name.)
 - **Updating the code:** if the files change, upload the new versions to the GitHub repo the same drag-and-drop way (GitHub → **Add file → Upload files**) and raise the `"version"` number in `custom_components/cooling_zone_manager/manifest.json` (e.g. `1.1.0` → `1.1.1`). HACS will then offer the update, and after restarting you can confirm the new version on the integration's device page. What changed in each release is listed in [CHANGELOG.md](CHANGELOG.md).
 

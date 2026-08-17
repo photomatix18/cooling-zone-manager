@@ -12,6 +12,7 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_ADD_ANOTHER,
+    CONF_COOLDOWN_MINUTES,
     CONF_MAX_RUN_MINUTES,
     CONF_MAX_ZONES,
     CONF_OVERLAP,
@@ -20,6 +21,7 @@ from .const import (
     CONF_TEMP_SENSOR,
     CONF_ZONE_NAME,
     CONF_ZONES,
+    DEFAULT_COOLDOWN_MINUTES,
     DEFAULT_MAX_RUN_MINUTES,
     DEFAULT_MAX_ZONES,
     DEFAULT_NAME,
@@ -88,6 +90,17 @@ class CoolingZoneManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         unit_of_measurement="min",
                     )
                 ),
+                vol.Required(
+                    CONF_COOLDOWN_MINUTES, default=DEFAULT_COOLDOWN_MINUTES
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0,
+                        max=60,
+                        step=1,
+                        mode=selector.NumberSelectorMode.BOX,
+                        unit_of_measurement="min",
+                    )
+                ),
                 vol.Optional(CONF_TEMP_SENSOR): selector.EntitySelector(
                     selector.EntitySelectorConfig(
                         domain="sensor", device_class="temperature"
@@ -126,6 +139,11 @@ class CoolingZoneManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_MAX_RUN_MINUTES: int(
                         self._settings.get(
                             CONF_MAX_RUN_MINUTES, DEFAULT_MAX_RUN_MINUTES
+                        )
+                    ),
+                    CONF_COOLDOWN_MINUTES: int(
+                        self._settings.get(
+                            CONF_COOLDOWN_MINUTES, DEFAULT_COOLDOWN_MINUTES
                         )
                     ),
                 }

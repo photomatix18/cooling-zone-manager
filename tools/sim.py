@@ -202,13 +202,13 @@ ZONES = [
 ]
 
 
-def make_sim(rr, max_run=1200, outdoor="86.2"):
+def make_sim(rr, max_run=1200, outdoor="86.2", cooldown=0):
     global CURRENT_SIM
     sim = Sim()
     CURRENT_SIM = sim
     mgr = CoolingZoneManager(
         sim.hass, "test", ZONES, max_zones=3, overlap=30,
-        max_run=max_run, temp_entity="sensor.outdoor",
+        max_run=max_run, temp_entity="sensor.outdoor", cooldown=cooldown,
     )
     mgr.zone_thresholds = {2: 85.0, 3: 70.0}
     mgr._rr = list(rr)
@@ -370,10 +370,65 @@ async def scenario_h():
     print("H: dead sensor falls back to manual max after grace — PASS")
 
 
+async def scenario_i():
+    """Compressor cooldown: a start after all-off waits out the minimum."""
+    sim, mgr = make_sim(["BR", "KO", "LR"], cooldown=300)
+    await sim.tick("switch.req_br", "on")
+    assert [c[1] for c in ons(sim)] == ["switch.cool_br"], (
+        "first-ever start should not be cooldown-blocked: %s" % sim.calls)
+    await sim.advance(600)  # BR confirms and runs
+    await sim.tick("switch.req_br", "off")  # winddown starts (30 s)
+    await sim.advance(120)  # off commanded at +30, confirmed at +50
+    assert sim.states["switch.cool_br"][0] == "off"
+    # 90 s after the off command: still inside the 300 s cooldown.
+    await sim.tick("switch.req_br", "on")
+    assert len(ons(sim)) == 1, "start during cooldown: %s" % sim.calls
+    assert mgr.zone_status("BR") == "cooldown", mgr.zone_status("BR")
+    cd = mgr.zone_countdown("BR")
+    assert cd is not None and cd[1] == "compressor_cooldown", cd
+    assert mgr._rest_timer is not None, "no re-check scheduled for cooldown end"
+    await sim.advance(400)  # cooldown expires; deferred timer starts BR
+    assert len(ons(sim)) == 2, "cooldown never released: %s" % sim.calls
+    assert sim.states["switch.cool_br"][0] == "on"
+    print("I: compressor cooldown blocks, then releases the start — PASS")
+
+
+async def scenario_j():
+    """Cooldown never blocks an overlap handoff (compressor stays on)."""
+    sim, mgr = make_sim(["LR", "KO", "BR"], cooldown=600)
+    sim.set_state("switch.req_br", "on")
+    sim.set_state("switch.cool_br", "on")
+    mgr._started["BR"] = sim.now - 1500
+    await sim.tick("switch.req_lr", "on")
+    assert mgr._preempted.get("BR") == "max_run", mgr._preempted
+    assert [c[1] for c in ons(sim)] == ["switch.cool_lr"], (
+        "handoff start wrongly cooldown-blocked: %s" % sim.calls)
+    await sim.advance(60)
+    assert sim.states["switch.cool_br"][0] == "off"
+    assert sim.states["switch.cool_lr"][0] == "on"
+    print("J: overlap handoff unaffected by the cooldown — PASS")
+
+
+async def scenario_k():
+    """Free capacity: an over-limit runner is NOT rotated for a new waiter."""
+    sim, mgr = make_sim(["LR", "KO", "BR"], outdoor="60.0")  # tier 3 allowed
+    sim.set_state("switch.req_br", "on")
+    sim.set_state("switch.cool_br", "on")
+    mgr._started["BR"] = sim.now - 1500  # past max_run
+    await sim.tick("switch.req_lr", "on")
+    assert "BR" not in mgr._preempted, (
+        "rotated a runner although the waiter had a free slot")
+    assert [c[1] for c in ons(sim)] == ["switch.cool_lr"], sim.calls
+    await sim.advance(120)
+    assert sim.states["switch.cool_br"][0] == "on", "BR blinked off"
+    assert sim.states["switch.cool_lr"][0] == "on"
+    print("K: no rotation while free capacity exists, no blink — PASS")
+
+
 async def main():
     for scen in (scenario_a, scenario_a2, scenario_b, scenario_c,
                  scenario_d, scenario_e, scenario_f, scenario_g,
-                 scenario_h):
+                 scenario_h, scenario_i, scenario_j, scenario_k):
         await scen()
     print("\nall scenarios passed")
 

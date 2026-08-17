@@ -2,6 +2,54 @@
 
 All notable changes to the Cooling Zone Manager integration are documented here.
 
+## 1.6.0 — 2026-08-17
+
+### Added
+
+- **Compressor cooldown (anti-short-cycle).** A new **Compressor cooldown**
+  number entity (and config-flow field): once every zone is off, no zone may
+  start again until this many minutes have passed since the last zone
+  switched off — so the compressor can never stop and immediately restart.
+  Default 5 minutes, `0` disables it. Overlap handoffs are unaffected: while
+  any zone is still on (winding down included) the compressor never stopped,
+  so zone-to-zone rotation keeps working exactly as before. The cooldown
+  survives restarts (it is derived from the persisted run-end times), so a
+  Home Assistant reboot right after the system shuts off still respects it.
+  A future heating manager entry gets its own independent knob — set either
+  one to `0` where no cooldown is wanted.
+
+- **Every delay is now visible.** Anything that makes the manager *wait* —
+  which used to look like a bug from the dashboard — now shows as a live
+  countdown:
+  - A **Cooldown ends** timestamp sensor: when the compressor cooldown
+    expires (unknown while none is running), with the configured length and
+    the moment the compressor went off as attributes.
+  - A per-zone **countdown** timestamp sensor showing the zone's next
+    scheduled transition, with a `countdown_type` attribute naming it:
+    `switching_off` (wind-down ends), `compressor_cooldown`, `resting`
+    (its own rest gate opens), `priority_eviction` / `waits_for_guard`
+    (the 5-minute compressor guard clears), and `max_run_rotation` /
+    `waits_for_rotation` (a runner reaches the max-run limit). Timestamp
+    sensors render as live countdowns ("in 4 minutes") on any dashboard
+    card.
+  - Zone status sensors gained a **`cooldown`** state, shown while a
+    requesting zone is blocked only by the compressor cooldown, plus
+    `winddown_until`, `resting_until`, and the countdown as attributes.
+  - The Active zones sensor now exposes `cooldown_seconds` and
+    `cooldown_until`.
+
+### Fixed
+
+- **A zone is no longer rotated out when the new waiter has a free slot.**
+  The max-run rotation fired whenever a runner was over the limit and a
+  rested zone was waiting — even if capacity was free, so the waiter could
+  simply have started. The runner was wound down for nothing, blinked off,
+  and restarted into the freed capacity moments later. Rotation now only
+  happens when the waiter genuinely has no free slot to take; with capacity
+  to spare, the waiter starts and the runner keeps cooling (a zone with no
+  competition was never supposed to be cut off). With one allowed zone —
+  the common hot-day case — nothing changes.
+
 ## 1.5.0 — 2026-08-16
 
 ### Fixed

@@ -9,6 +9,7 @@ CONF_SWITCH_ENTITY = "switch_entity"
 CONF_MAX_ZONES = "max_zones"
 CONF_OVERLAP = "overlap_seconds"
 CONF_MAX_RUN_MINUTES = "max_run_minutes"
+CONF_COOLDOWN_MINUTES = "cooldown_minutes"
 # Legacy key from 1.1.0 entries, which stored seconds.
 CONF_MAX_RUN = "max_run_seconds"
 CONF_TEMP_SENSOR = "temp_sensor"
@@ -52,5 +53,10 @@ DEFAULT_MAX_ZONES = 2
 DEFAULT_OVERLAP = 15
 # 0 disables the max-run rotation.
 DEFAULT_MAX_RUN_MINUTES = 0
+# Minimum compressor off time: once every zone is off, nothing may start
+# again until this much time has passed since the last zone switched off.
+# 0 disables it. Heating (when it exists) gets its own manager entry with
+# its own knob, so the two can differ or be off independently.
+DEFAULT_COOLDOWN_MINUTES = 5
 
 STORAGE_VERSION = 1

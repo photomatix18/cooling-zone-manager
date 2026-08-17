@@ -8,12 +8,14 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.loader import async_get_integration
 
 from .const import (
+    CONF_COOLDOWN_MINUTES,
     CONF_MAX_RUN,
     CONF_MAX_RUN_MINUTES,
     CONF_MAX_ZONES,
     CONF_OVERLAP,
     CONF_TEMP_SENSOR,
     CONF_ZONES,
+    DEFAULT_COOLDOWN_MINUTES,
     DEFAULT_MAX_ZONES,
     DEFAULT_OVERLAP,
     DOMAIN,
@@ -39,6 +41,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         int(entry.data.get(CONF_OVERLAP, DEFAULT_OVERLAP)),
         max_run_seconds,
         entry.data.get(CONF_TEMP_SENSOR),
+        int(entry.data.get(CONF_COOLDOWN_MINUTES, DEFAULT_COOLDOWN_MINUTES)) * 60,
     )
     integration = await async_get_integration(hass, DOMAIN)
     manager.version = str(integration.version)
@@ -75,10 +78,13 @@ def _async_cleanup_orphans(
         f"{entry.entry_id}_max_zones",
         f"{entry.entry_id}_overlap",
         f"{entry.entry_id}_max_run",
+        f"{entry.entry_id}_cooldown",
+        f"{entry.entry_id}_cooldown_until",
     }
     for zone in manager.zones:
         expected.add(f"{entry.entry_id}_zone_{zone.name}_status")
         expected.add(f"{entry.entry_id}_zone_{zone.name}_runtime")
+        expected.add(f"{entry.entry_id}_zone_{zone.name}_countdown")
         expected.add(f"{entry.entry_id}_priority_{zone.name}")
     if manager.temp_entity:
         for tier in range(2, len(manager.zones) + 1):

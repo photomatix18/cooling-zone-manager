@@ -23,6 +23,7 @@ async def async_setup_entry(
         MaxZonesNumber(manager, entry),
         OverlapNumber(manager, entry),
         MaxRunNumber(manager, entry),
+        CooldownNumber(manager, entry),
     ]
     for zone in manager.zones:
         entities.append(ZonePriorityNumber(manager, entry, zone.name))
@@ -139,6 +140,30 @@ class MaxRunNumber(_ManagerNumber):
 
     def _push(self, value: float) -> None:
         self._manager.max_run = int(value) * 60
+
+
+class CooldownNumber(_ManagerNumber):
+    """Minimum compressor off time once every zone is off. 0 disables it.
+
+    Set in minutes; the manager keeps seconds internally. A future heating
+    manager entry gets its own copy of this knob, so cooling and heating
+    cooldowns are independent (set 0 wherever none is wanted).
+    """
+
+    _attr_name = "Compressor cooldown"
+    _attr_icon = "mdi:timer-lock-outline"
+    _attr_native_min_value = 0
+    _attr_native_max_value = 60
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+
+    def __init__(self, manager: CoolingZoneManager, entry: ConfigEntry) -> None:
+        super().__init__(manager, entry)
+        self._attr_unique_id = f"{entry.entry_id}_cooldown"
+        self._attr_native_value = manager.cooldown // 60
+
+    def _push(self, value: float) -> None:
+        self._manager.cooldown = int(value) * 60
 
 
 class ZonePriorityNumber(_ManagerNumber):

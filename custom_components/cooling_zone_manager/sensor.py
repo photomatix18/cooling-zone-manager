@@ -23,11 +23,12 @@ from .manager import CoolingZoneManager
 # while a zone is running between state changes.
 SCAN_INTERVAL = timedelta(seconds=30)
 
-ZONE_STATES = ["cooling", "winding_down", "waiting", "idle"]
+ZONE_STATES = ["cooling", "winding_down", "cooldown", "waiting", "idle"]
 
 STATE_ICONS = {
     "cooling": "mdi:snowflake",
     "winding_down": "mdi:snowflake-melt",
+    "cooldown": "mdi:snowflake-off",
     "waiting": "mdi:timer-sand",
     "idle": "mdi:power-standby",
 }
@@ -43,10 +44,12 @@ async def async_setup_entry(
     entities: list[SensorEntity] = [
         ZoneStatusSensor(manager, entry),
         TotalRuntimeSensor(manager, entry),
+        CooldownSensor(manager, entry),
     ]
     for zone in manager.zones:
         entities.append(ZoneDetailSensor(manager, entry, zone.name))
         entities.append(ZoneRuntimeSensor(manager, entry, zone.name))
+        entities.append(ZoneCountdownSensor(manager, entry, zone.name))
     async_add_entities(entities)
 
 
@@ -100,6 +103,12 @@ class ZoneStatusSensor(_ManagerSensor):
             "max_zones": manager.max_zones,
             "overlap_seconds": manager.overlap,
             "max_run_seconds": manager.max_run,
+            "cooldown_seconds": manager.cooldown,
+            "cooldown_until": (
+                manager.cooldown_until.isoformat()
+                if manager.cooldown_until
+                else None
+            ),
             "outdoor_temp": manager.outdoor_temp,
             "temp_allowed_zones": manager.temp_allowed_zones,
             "effective_max_zones": manager.effective_max_zones,
@@ -148,6 +157,9 @@ class ZoneDetailSensor(_ManagerSensor):
         name = self._zone_name
         zone = manager.get_zone(name)
         started = manager.zone_started_at(name)
+        winddown = manager.zone_winddown_until(name)
+        resting = manager.zone_resting_until(name)
+        countdown = manager.zone_countdown(name)
         rr = manager.rr_order
         return {
             "request_entity": zone.request_entity,
@@ -159,6 +171,10 @@ class ZoneDetailSensor(_ManagerSensor):
             "started_at": started.isoformat() if started else None,
             "cycle_runtime_seconds": round(manager.zone_cycle_runtime(name)),
             "last_cycle_seconds": round(manager.zone_last_cycle(name)),
+            "winddown_until": winddown.isoformat() if winddown else None,
+            "resting_until": resting.isoformat() if resting else None,
+            "countdown": countdown[0].isoformat() if countdown else None,
+            "countdown_type": countdown[1] if countdown else None,
             "round_robin_position": rr.index(name) + 1 if name in rr else None,
         }
 
@@ -238,3 +254,75 @@ class TotalRuntimeSensor(_RuntimeSensor):
                 for zone in manager.zones
             },
         }
+
+
+class _CountdownSensor(_ManagerSensor):
+    """Base for the timestamp countdown sensors.
+
+    The frontend renders a timestamp sensor as a live countdown ("in 4
+    minutes"). Event-driven updates plus a slow poll, so an expired
+    countdown clears itself even when no state change follows it.
+    """
+
+    _attr_should_poll = True
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+
+class CooldownSensor(_CountdownSensor):
+    """When the compressor cooldown ends; unknown while none is running.
+
+    The cooldown starts the moment the last zone switches off and blocks
+    every zone start until it expires, so the compressor cannot short
+    cycle. Overlap handoffs are unaffected (the compressor never stops).
+    """
+
+    _attr_name = "Cooldown ends"
+    _attr_icon = "mdi:timer-sand"
+
+    def __init__(self, manager: CoolingZoneManager, entry: ConfigEntry) -> None:
+        super().__init__(manager, entry)
+        self._attr_unique_id = f"{entry.entry_id}_cooldown_until"
+
+    @property
+    def native_value(self) -> Any:
+        return self._manager.cooldown_until
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        manager = self._manager
+        off_at = manager.last_compressor_off
+        return {
+            "active": manager.cooldown_until is not None,
+            "cooldown_seconds": manager.cooldown,
+            "compressor_off_at": off_at.isoformat() if off_at else None,
+        }
+
+
+class ZoneCountdownSensor(_CountdownSensor):
+    """The zone's next scheduled transition, as a live countdown.
+
+    Whatever delay currently applies to the zone — wind-down, rest gate,
+    compressor cooldown, priority guard, or a pending max-run rotation —
+    this shows when it ends; the ``countdown_type`` attribute says which
+    one it is. Unknown when nothing is pending for the zone.
+    """
+
+    _attr_icon = "mdi:progress-clock"
+
+    def __init__(
+        self, manager: CoolingZoneManager, entry: ConfigEntry, zone_name: str
+    ) -> None:
+        super().__init__(manager, entry)
+        self._zone_name = zone_name
+        self._attr_name = f"{zone_name} countdown"
+        self._attr_unique_id = f"{entry.entry_id}_zone_{zone_name}_countdown"
+
+    @property
+    def native_value(self) -> Any:
+        countdown = self._manager.zone_countdown(self._zone_name)
+        return countdown[0] if countdown else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        countdown = self._manager.zone_countdown(self._zone_name)
+        return {"countdown_type": countdown[1] if countdown else None}
