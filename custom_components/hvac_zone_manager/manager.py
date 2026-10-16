@@ -1,4 +1,8 @@
-"""The reconciler state machine that arbitrates cooling zones.
+"""The reconciler state machine that arbitrates HVAC zones.
+
+One manager handles one direction (an entry's ``mode``): cooling or
+heating. Everything below applies to both; "cooling" in the comments
+means "running" in whichever direction the entry manages.
 
 Same behavior as the YAML v2 automation, implemented natively:
 
@@ -33,6 +37,16 @@ Same behavior as the YAML v2 automation, implemented natively:
   short minimum-run guard); sheds and trims take the worst-priority
   zones first. With every zone at the default, all of this collapses to
   plain round-robin.
+* A floor, ``min_zones`` (heating entries; 0 or 1 disables it): whenever
+  a requesting zone runs and fewer than ``min_zones`` zones are running,
+  the manager pulls in *companions* — zones run for the equipment's sake,
+  not because their room asked. The companion is the eligible zone
+  furthest below its own setpoint (read from its climate entity, which
+  must be in this entry's mode). A companion gives its slot back when its
+  room passes setpoint + ``companion_margin``, when enough real requests
+  arrive, or when the last requester is satisfied. If no zone is
+  eligible, the requester runs alone — the floor never keeps a room from
+  heating.
 * Everything is re-derived from live entity states on every pass, so the
   manager self-heals after restarts, reloads, or manual switch changes.
   The one exception is the manager's own recent commands: a template
@@ -63,8 +77,11 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    COMPANION_HYSTERESIS,
     DEFAULT_PRIORITY,
     DOMAIN,
+    MODE_COOLING,
+    MODE_HEATING,
     PENDING_GRACE,
     PRIORITY_MIN_RUN,
     STORAGE_VERSION,
@@ -77,15 +94,17 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class Zone:
-    """One managed cooling zone."""
+    """One managed zone."""
 
     name: str
     request_entity: str
     switch_entity: str
+    # The zone's thermostat; needed only to choose and release companions.
+    climate_entity: str | None = None
 
 
 class CoolingZoneManager:
-    """Keep at most ``max_zones`` cooling switches on at a time."""
+    """Keep between ``min_zones`` and ``max_zones`` zone switches on."""
 
     def __init__(
         self,
@@ -97,9 +116,23 @@ class CoolingZoneManager:
         max_run: int = 0,
         temp_entity: str | None = None,
         cooldown: int = 0,
+        mode: str = MODE_COOLING,
+        min_zones: int = 0,
+        companion_margin: float = 2.0,
     ) -> None:
         self.hass = hass
         self.zones = zones
+        self.mode = mode
+        # Floor on concurrent zones while any requester runs; <= 1 is off.
+        self.min_zones = int(min_zones)
+        # Degrees past its own setpoint a companion may go before it gives
+        # its slot back.
+        self.companion_margin = float(companion_margin)
+        # Zones running for load rather than their own request.
+        self._companions: set[str] = set()
+        # Whether the last pass wanted a companion and found none; only
+        # used to log the transition once instead of on every pass.
+        self._short_of_floor = False
         self.max_zones = int(max_zones)
         self.overlap = int(overlap)
         # Longest a zone may run while others wait; 0 disables the limit.
@@ -124,6 +157,7 @@ class CoolingZoneManager:
         self.version: str | None = None
 
         self._by_name = {zone.name: zone for zone in zones}
+        self._climate_entities = {z.climate_entity for z in zones if z.climate_entity}
         # Round-robin order, least recently started first.
         self._rr: list[str] = [zone.name for zone in zones]
         # zone name -> (fire-at epoch, cancel) for its wind-down timer
@@ -205,6 +239,9 @@ class CoolingZoneManager:
         for zone in self.zones:
             entities.append(zone.request_entity)
             entities.append(zone.switch_entity)
+        # Room temperatures and modes decide companions, so their changes
+        # need a pass too (min_zones can be raised live, so always track).
+        entities.extend(sorted(self._climate_entities))
         if self.temp_entity:
             entities.append(self.temp_entity)
         self._unsub_state = async_track_state_change_event(
@@ -363,12 +400,30 @@ class CoolingZoneManager:
         """The zone's priority: 1 runs first, 3 yields to everyone."""
         return int(self.zone_priorities.get(name, DEFAULT_PRIORITY))
 
+    @property
+    def active_word(self) -> str:
+        """The running status word for this entry: cooling or heating."""
+        return "heating" if self.mode == MODE_HEATING else "cooling"
+
+    @property
+    def companion_zones(self) -> list[str]:
+        """Zones running for load, not because their room asked."""
+        return [z.name for z in self.zones if z.name in self._companions]
+
+    @property
+    def short_of_floor(self) -> bool:
+        """True while a requester runs below min_zones with no companion."""
+        return self._short_of_floor
+
     def zone_status(self, name: str) -> str:
-        """One-word status: cooling, winding_down, cooldown, waiting, idle."""
+        """One-word status: cooling or heating, companion, winding_down,
+        cooldown, waiting, idle."""
         if name in self._winddown:
             return "winding_down"
         if self.zone_cooling(name):
-            return "cooling"
+            if name in self._companions:
+                return "companion"
+            return self.active_word
         if self.zone_requesting(name):
             if self._cooldown_until_ts() is not None:
                 return "cooldown"
@@ -638,8 +693,10 @@ class CoolingZoneManager:
         new_state = event.data.get("new_state")
         if new_state is None:
             return
-        if event.data.get("entity_id") == self.temp_entity:
-            # Any temperature change may move the capacity tier.
+        entity_id = event.data.get("entity_id")
+        if entity_id == self.temp_entity or entity_id in self._climate_entities:
+            # Any temperature change may move the capacity tier, or start
+            # or release a companion.
             self.hass.async_create_task(self.async_reconcile())
             return
         if new_state.state not in ("on", "off"):
@@ -678,10 +735,18 @@ class CoolingZoneManager:
             # first state change (or the grace expiring) unfreezes.
             limit = max(1, min(limit, len(on - set(self._winddown))))
 
+        # 0b) Companions: drop the ones no longer needed or past their
+        #     margin. A released companion is simply no longer wanted, so
+        #     step 2 winds it down through the normal overlap. Companions
+        #     count as wanted from here on, exactly like a request.
+        self._retain_companions(on, requesting, limit)
+        wanted = requesting | self._companions
+
         # 1) Clean up stale timers, and re-admit zones whose request came
         #    back during their overlap (this is the anti-short-cycle fix).
         #    Preempted zones are the exception: they still request, but they
         #    used up their turn, so they finish their wind-down anyway.
+        #    A zone picked again as a companion is re-admitted the same way.
         if self.max_run <= 0:
             # The max-run limit was just disabled; its pending preemptions
             # are void and those zones get re-admitted below like any
@@ -694,7 +759,7 @@ class CoolingZoneManager:
             if name not in on:
                 self._cancel_winddown(name)
                 self._preempted.pop(name, None)
-            elif name in requesting and name not in self._preempted:
+            elif name in wanted and name not in self._preempted:
                 self._cancel_winddown(name)
                 _LOGGER.info(
                     "Zone '%s' re-requested during overlap; it stays on", name
@@ -705,9 +770,9 @@ class CoolingZoneManager:
             if name in self._winddown
         }
 
-        # 2) Begin wind-down for zones that lost their request. The zone
-        #    keeps cooling until its timer fires.
-        for name in on - requesting:
+        # 2) Begin wind-down for zones that lost their request (or their
+        #    companion role). The zone keeps cooling until its timer fires.
+        for name in on - wanted:
             if name not in self._winddown:
                 self._schedule_winddown(name)
                 _LOGGER.info(
@@ -913,6 +978,11 @@ class CoolingZoneManager:
                     # the max-run timer are already correct in this pass.
                     self._started.setdefault(name, dt_util.utcnow().timestamp())
 
+            # 7b) The floor: top up with companions so a running requester
+            #     never runs below min_zones (cooldown gating applies, since
+            #     a companion only ever starts alongside a requester).
+            await self._fill_companions(on, requesting, limit)
+
         # 8) Keep a timer on every running zone so a reconcile pass fires
         #    the moment it crosses the max-run threshold, and one for the
         #    earliest deferred re-check (rest gate, eviction guard, startup
@@ -937,7 +1007,9 @@ class CoolingZoneManager:
             self._session_runtime = 0.0
             self._session_started = now
             self._dirty = True
-            _LOGGER.info("New cooling session started; session total reset")
+            _LOGGER.info(
+                "New %s session started; session total reset", self.active_word
+            )
         if self._idle != (not active):
             self._idle = not active
             self._dirty = True
@@ -978,6 +1050,143 @@ class CoolingZoneManager:
             state = self.hass.states.get(self._by_name[name].switch_entity)
             if state is not None and state.state == "off":
                 del self._restored_started[name]
+
+    # ----------------------------------------------------------- companions
+
+    def _zone_excess(self, name: str) -> tuple[bool, float | None]:
+        """Whether the zone may serve as a companion, and how far past its
+        setpoint it is (positive = past it, in this entry's direction).
+
+        A zone with a climate entity qualifies only while that thermostat
+        is in this entry's mode — a room someone switched off, or left in
+        the other mode, is never run for load. A zone without one always
+        qualifies, with unknown excess.
+        """
+        entity = self._by_name[name].climate_entity
+        if not entity:
+            return True, None
+        state = self.hass.states.get(entity)
+        if state is None:
+            return False, None
+        wanted_mode = "heat" if self.mode == MODE_HEATING else "cool"
+        if state.state not in (wanted_mode, "heat_cool"):
+            return False, None
+        attrs = state.attributes
+        if state.state == "heat_cool":
+            key = "target_temp_low" if self.mode == MODE_HEATING else "target_temp_high"
+            target = attrs.get(key)
+        else:
+            target = attrs.get("temperature")
+        current = attrs.get("current_temperature")
+        try:
+            target, current = float(target), float(current)
+        except (TypeError, ValueError):
+            return True, None
+        excess = current - target if self.mode == MODE_HEATING else target - current
+        return True, excess
+
+    def _companion_ok(self, name: str, starting: bool) -> bool:
+        """May the zone start (or keep) running as a companion?
+
+        Starting needs the room a hysteresis band inside the margin, so a
+        zone released at the margin is not picked straight back up.
+        """
+        eligible, excess = self._zone_excess(name)
+        if not eligible:
+            return False
+        if excess is None:
+            return True
+        limit = self.companion_margin - (COMPANION_HYSTERESIS if starting else 0.0)
+        return excess < limit
+
+    def _companion_rank(self, name: str) -> tuple:
+        """Sort key: already on first, then the neediest room, then RR."""
+        _eligible, excess = self._zone_excess(name)
+        return (
+            0 if name in self._winddown else 1,
+            excess if excess is not None else float("inf"),
+            self._rr.index(name),
+        )
+
+    def _floor_target(self, on: set[str], requesting: set[str], limit: int) -> int:
+        """How many companions are needed right now (0 when none are)."""
+        if self.min_zones <= 1:
+            return 0
+        winding = set(self._winddown)
+        if not (on & requesting) - winding:
+            return 0  # no requester is running; nothing to accompany
+        floor = min(self.min_zones, limit)
+        # Requesters, running or about to start, take precedence.
+        return max(0, floor - min(len(requesting), limit))
+
+    def _retain_companions(
+        self, on: set[str], requesting: set[str], limit: int
+    ) -> None:
+        """Drop companions that are off, requesting, unneeded, or past
+        their margin. Released zones wind down through step 2."""
+        if not self._companions:
+            return
+        # A companion whose room now asks on its own is a plain requester;
+        # one switched off by hand is gone.
+        self._companions = {
+            c for c in self._companions if c in on and c not in requesting
+        }
+        needed = self._floor_target(on, requesting, limit)
+        keep = sorted(
+            (c for c in self._companions if self._companion_ok(c, starting=False)),
+            key=self._companion_rank,
+        )[:needed]
+        for name in sorted(self._companions - set(keep)):
+            _LOGGER.info("Companion zone '%s' released", name)
+        self._companions = set(keep)
+
+    async def _fill_companions(
+        self, on: set[str], requesting: set[str], limit: int
+    ) -> None:
+        """Start companions until the floor is met or none qualify."""
+        needed = self._floor_target(on, requesting, limit)
+        short = False
+        while len(self._companions) < needed:
+            winding = set(self._winddown)
+            if len(on - winding) >= limit:
+                break
+            candidates = [
+                z.name
+                for z in self.zones
+                if z.name not in requesting
+                and z.name not in self._companions
+                and (z.name not in on or z.name in winding)
+                and z.name not in self._preempted
+                and self._companion_ok(z.name, starting=True)
+            ]
+            if not candidates:
+                short = True
+                break
+            name = min(candidates, key=self._companion_rank)
+            self._companions.add(name)
+            if name in winding:
+                # Already running; keep it instead of switching it off.
+                self._cancel_winddown(name)
+                _LOGGER.info(
+                    "Zone '%s' kept on as a companion (min zones %s)",
+                    name,
+                    self.min_zones,
+                )
+                continue
+            _LOGGER.info(
+                "Starting zone '%s' as a companion (min zones %s)",
+                name,
+                self.min_zones,
+            )
+            await self._turn_on(name)
+            on.add(name)
+            self._started.setdefault(name, dt_util.utcnow().timestamp())
+        if short and not self._short_of_floor:
+            _LOGGER.info(
+                "No zone qualifies as a companion; running below min zones (%s)",
+                self.min_zones,
+            )
+        self._short_of_floor = short
 
     # ------------------------------------------------------ waiter helpers
 
@@ -1115,7 +1324,11 @@ class CoolingZoneManager:
             # in a race, the zone keeps running. Preempted zones switch off
             # regardless: their request never left, but their turn is over.
             if self._zone_on(name) and (
-                preempted or not self._is_on(zone.request_entity)
+                preempted
+                or (
+                    not self._is_on(zone.request_entity)
+                    and name not in self._companions
+                )
             ):
                 _LOGGER.info("Zone '%s' overlap expired; switching off", name)
                 await self._turn_off(name)

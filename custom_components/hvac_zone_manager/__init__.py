@@ -2,23 +2,31 @@
 from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
+from homeassistant.const import Platform, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.loader import async_get_integration
 
 from .const import (
+    CONF_COMPANION_MARGIN,
     CONF_COOLDOWN_MINUTES,
     CONF_MAX_RUN,
     CONF_MAX_RUN_MINUTES,
     CONF_MAX_ZONES,
+    CONF_MIN_ZONES,
+    CONF_MODE,
     CONF_OVERLAP,
     CONF_TEMP_SENSOR,
     CONF_ZONES,
+    DEFAULT_COMPANION_MARGIN_C,
+    DEFAULT_COMPANION_MARGIN_F,
     DEFAULT_COOLDOWN_MINUTES,
     DEFAULT_MAX_ZONES,
+    DEFAULT_MIN_ZONES_HEATING,
     DEFAULT_OVERLAP,
     DOMAIN,
+    MODE_COOLING,
+    MODE_HEATING,
 )
 from .manager import CoolingZoneManager, Zone
 
@@ -33,6 +41,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     else:
         # Entries created by 1.1.0 stored this in seconds.
         max_run_seconds = int(entry.data.get(CONF_MAX_RUN, 0))
+    mode = entry.data.get(CONF_MODE, MODE_COOLING)
+    default_margin = (
+        DEFAULT_COMPANION_MARGIN_C
+        if hass.config.units.temperature_unit == UnitOfTemperature.CELSIUS
+        else DEFAULT_COMPANION_MARGIN_F
+    )
     manager = CoolingZoneManager(
         hass,
         entry.entry_id,
@@ -42,6 +56,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         max_run_seconds,
         entry.data.get(CONF_TEMP_SENSOR),
         int(entry.data.get(CONF_COOLDOWN_MINUTES, DEFAULT_COOLDOWN_MINUTES)) * 60,
+        mode=mode,
+        min_zones=int(
+            entry.data.get(
+                CONF_MIN_ZONES,
+                DEFAULT_MIN_ZONES_HEATING if mode == MODE_HEATING else 0,
+            )
+        ),
+        companion_margin=float(entry.data.get(CONF_COMPANION_MARGIN, default_margin)),
     )
     integration = await async_get_integration(hass, DOMAIN)
     manager.version = str(integration.version)
@@ -89,6 +111,9 @@ def _async_cleanup_orphans(
     if manager.temp_entity:
         for tier in range(2, len(manager.zones) + 1):
             expected.add(f"{entry.entry_id}_threshold_{tier}")
+    if manager.mode == MODE_HEATING:
+        expected.add(f"{entry.entry_id}_min_zones")
+        expected.add(f"{entry.entry_id}_companion_margin")
     for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
         if entity.unique_id not in expected:
             registry.async_remove(entity.entity_id)

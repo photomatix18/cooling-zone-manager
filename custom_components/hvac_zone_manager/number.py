@@ -8,7 +8,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DEFAULT_PRIORITY, DOMAIN, PRIORITY_MAX, PRIORITY_MIN
+from .const import DEFAULT_PRIORITY, DOMAIN, MODE_HEATING, PRIORITY_MAX, PRIORITY_MIN
 from .manager import CoolingZoneManager
 
 
@@ -25,6 +25,9 @@ async def async_setup_entry(
         MaxRunNumber(manager, entry),
         CooldownNumber(manager, entry),
     ]
+    if manager.mode == MODE_HEATING:
+        entities.append(MinZonesNumber(manager, entry))
+        entities.append(CompanionMarginNumber(manager, entry))
     for zone in manager.zones:
         entities.append(ZonePriorityNumber(manager, entry, zone.name))
     # Temperature-aware capacity: one threshold per zone beyond the first,
@@ -145,12 +148,11 @@ class MaxRunNumber(_ManagerNumber):
 class CooldownNumber(_ManagerNumber):
     """Minimum compressor off time once every zone is off. 0 disables it.
 
-    Set in minutes; the manager keeps seconds internally. A future heating
-    manager entry gets its own copy of this knob, so cooling and heating
-    cooldowns are independent (set 0 wherever none is wanted).
+    Set in minutes; the manager keeps seconds internally. Each entry has
+    its own copy of this knob, so cooling and heating cooldowns are
+    independent (set 0 wherever none is wanted).
     """
 
-    _attr_name = "Compressor cooldown"
     _attr_icon = "mdi:timer-lock-outline"
     _attr_native_min_value = 0
     _attr_native_max_value = 60
@@ -160,10 +162,60 @@ class CooldownNumber(_ManagerNumber):
     def __init__(self, manager: CoolingZoneManager, entry: ConfigEntry) -> None:
         super().__init__(manager, entry)
         self._attr_unique_id = f"{entry.entry_id}_cooldown"
+        self._attr_name = (
+            "Furnace cooldown" if manager.mode == MODE_HEATING else "Compressor cooldown"
+        )
         self._attr_native_value = manager.cooldown // 60
 
     def _push(self, value: float) -> None:
         self._manager.cooldown = int(value) * 60
+
+
+class MinZonesNumber(_ManagerNumber):
+    """The floor: zones that run together whenever any zone runs.
+
+    0 or 1 turns it off. Heating entries only.
+    """
+
+    _attr_name = "Min zones"
+    _attr_icon = "mdi:counter"
+    _attr_native_min_value = 0
+    _attr_native_step = 1
+
+    def __init__(self, manager: CoolingZoneManager, entry: ConfigEntry) -> None:
+        super().__init__(manager, entry)
+        self._attr_unique_id = f"{entry.entry_id}_min_zones"
+        self._attr_native_max_value = max(len(manager.zones), 1)
+        self._attr_native_value = manager.min_zones
+
+    def _push(self, value: float) -> None:
+        self._manager.min_zones = int(value)
+
+
+class CompanionMarginNumber(_ManagerNumber):
+    """How far past its own setpoint a companion zone may go.
+
+    A companion runs for the equipment's sake, not because its room
+    asked; once the room is this many degrees past setpoint it gives its
+    slot back. Heating entries only.
+    """
+
+    _attr_name = "Companion overshoot"
+    _attr_icon = "mdi:thermometer-chevron-up"
+    _attr_native_min_value = 0
+    _attr_native_max_value = 10
+    _attr_native_step = 0.5
+
+    def __init__(self, manager: CoolingZoneManager, entry: ConfigEntry) -> None:
+        super().__init__(manager, entry)
+        self._attr_unique_id = f"{entry.entry_id}_companion_margin"
+        self._attr_native_unit_of_measurement = (
+            manager.hass.config.units.temperature_unit
+        )
+        self._attr_native_value = manager.companion_margin
+
+    def _push(self, value: float) -> None:
+        self._manager.companion_margin = float(value)
 
 
 class ZonePriorityNumber(_ManagerNumber):

@@ -5,7 +5,8 @@ Stubs the handful of homeassistant modules manager.py imports, models the
 v1.5.0 behavior: no slot double-booking during switch lag, no blinks at
 startup before the outdoor sensor's first reading, and the priority rules
 (gated rotation, guarded eviction) acting as designed — while all-default
-priorities reproduce the old round-robin exactly.
+priorities reproduce the old round-robin exactly. Scenarios L-T cover
+the heating floor (v2.1.0): companions, give-back, and their edge cases.
 
 Run with any Python 3.10+: ``python tools/sim.py`` from the repo root.
 Scenarios A/A2/F replay real incidents from a live recorder database
@@ -111,6 +112,7 @@ for sub in ("const", "manager"):
     sys.modules[f"czm.{sub}"] = mod
     spec.loader.exec_module(mod)
 
+from czm.const import MODE_HEATING  # noqa: E402
 from czm.manager import CoolingZoneManager, Zone  # noqa: E402
 
 # ---------------------------------------------------------------- harness
@@ -123,6 +125,7 @@ class Sim:
         self.now = 1_000_000.0
         self.timers = []          # [fire_at, cb, alive]
         self.states = {}          # entity_id -> (state, last_changed_ts)
+        self.attrs = {}           # entity_id -> attributes (climate only)
         self.physical = []        # [apply_at, entity_id, state]
         self.calls = []           # (service, entity_id, at)
         self.mgr = None
@@ -139,6 +142,7 @@ class Sim:
                 return SimpleNamespace(
                     state=st,
                     last_changed=datetime.fromtimestamp(ts, timezone.utc),
+                    attributes=sim.attrs.get(eid, {}),
                 )
 
         class Services:
@@ -425,10 +429,197 @@ async def scenario_k():
     print("K: no rotation while free capacity exists, no blink — PASS")
 
 
+# ------------------------------------------------------------- heating
+
+HEAT_ZONES = [
+    Zone("LR", "switch.hreq_lr", "switch.heat_lr", "climate.lr"),
+    Zone("BR", "switch.hreq_br", "switch.heat_br", "climate.br"),
+    Zone("KO", "switch.hreq_ko", "switch.heat_ko", "climate.ko"),
+]
+
+
+def make_heat_sim(rr=("LR", "BR", "KO"), min_zones=2, cooldown=0):
+    global CURRENT_SIM
+    sim = Sim()
+    CURRENT_SIM = sim
+    mgr = CoolingZoneManager(
+        sim.hass, "heat", HEAT_ZONES, max_zones=3, overlap=30,
+        cooldown=cooldown, mode=MODE_HEATING, min_zones=min_zones,
+        companion_margin=2.0,
+    )
+    mgr._rr = list(rr)
+    mgr._boot = sim.now
+    sim.mgr = mgr
+    for z in HEAT_ZONES:
+        sim.set_state(z.request_entity, "off")
+        sim.set_state(z.switch_entity, "off")
+        room(sim, z.name, 68.0)
+    return sim, mgr
+
+
+def room(sim, name, current, target=68.0, mode="heat"):
+    eid = "climate." + name.lower()
+    sim.set_state(eid, mode)
+    sim.attrs[eid] = {"temperature": target, "current_temperature": current}
+
+
+async def room_tick(sim, name, current, target=68.0, mode="heat"):
+    room(sim, name, current, target, mode)
+    await sim.mgr.async_reconcile()
+
+
+def on_now(sim):
+    return sorted(z.name for z in HEAT_ZONES if sim.mgr._zone_on(z.name))
+
+
+async def scenario_l():
+    """One zone calls for heat: the neediest other zone joins it."""
+    sim, mgr = make_heat_sim()
+    room(sim, "LR", 67.5)
+    room(sim, "KO", 66.0)  # furthest below setpoint
+    room(sim, "BR", 66.5)
+    await sim.tick("switch.hreq_br", "on")
+    assert [c[1] for c in ons(sim)] == ["switch.heat_br", "switch.heat_ko"], sim.calls
+    assert mgr.companion_zones == ["KO"], mgr.companion_zones
+    assert mgr.zone_status("KO") == "companion"
+    assert mgr.zone_status("BR") == "heating"
+    await sim.advance(120)  # both confirm; nothing winds down
+    assert on_now(sim) == ["BR", "KO"], on_now(sim)
+    assert not [c for c in sim.calls if c[0] == "turn_off"], sim.calls
+    print("L: lone heat call pulls in the neediest companion - PASS")
+
+
+async def scenario_m():
+    """Give-back: a companion past its margin hands off with overlap."""
+    sim, mgr = make_heat_sim()
+    room(sim, "KO", 66.0)
+    room(sim, "LR", 67.0)
+    await sim.tick("switch.hreq_br", "on")
+    await sim.advance(60)
+    assert mgr.companion_zones == ["KO"]
+    await room_tick(sim, "KO", 69.9)  # +1.9: still inside the 2.0 margin
+    assert mgr.companion_zones == ["KO"], "released inside the margin"
+    await room_tick(sim, "KO", 70.1)  # +2.1: past it
+    assert mgr.companion_zones == ["LR"], mgr.companion_zones
+    assert "KO" in mgr.winding_down, "KO should hand off through overlap"
+    await sim.advance(90)
+    assert on_now(sim) == ["BR", "LR"], on_now(sim)
+    # Back to +1.6: inside the margin but not the hysteresis band, so KO
+    # may not be picked again yet.
+    room(sim, "KO", 69.6)
+    assert not mgr._companion_ok("KO", starting=True)
+    print("M: companion past its margin hands off to the next - PASS")
+
+
+async def scenario_n():
+    """A second real call makes the companion unnecessary."""
+    sim, mgr = make_heat_sim()
+    room(sim, "KO", 66.0)
+    await sim.tick("switch.hreq_br", "on")
+    await sim.advance(60)
+    await sim.tick("switch.hreq_lr", "on")
+    assert "LR" in on_now(sim)
+    assert mgr.companion_zones == [], mgr.companion_zones
+    assert "KO" in mgr.winding_down
+    await sim.advance(90)
+    assert on_now(sim) == ["BR", "LR"], on_now(sim)
+    print("N: a real second call releases the companion - PASS")
+
+
+async def scenario_o():
+    """The requester is satisfied: everything stops, cooldown holds."""
+    sim, mgr = make_heat_sim(cooldown=300)
+    room(sim, "KO", 66.0)
+    await sim.tick("switch.hreq_br", "on")
+    await sim.advance(600)
+    await sim.tick("switch.hreq_br", "off")
+    assert mgr.companion_zones == [], mgr.companion_zones
+    assert set(mgr.winding_down) == {"BR", "KO"}, mgr.winding_down
+    await sim.advance(120)
+    assert on_now(sim) == [], on_now(sim)
+    n = len(ons(sim))
+    await sim.tick("switch.hreq_lr", "on")  # inside the cooldown
+    assert len(ons(sim)) == n, "start during furnace cooldown: %s" % sim.calls
+    await sim.advance(400)
+    assert on_now(sim) == ["KO", "LR"], on_now(sim)
+    print("O: satisfied requester stops both; cooldown then pairs again - PASS")
+
+
+async def scenario_p():
+    """A companion whose own room starts asking stays on, no blink."""
+    sim, mgr = make_heat_sim()
+    room(sim, "KO", 66.0)
+    await sim.tick("switch.hreq_br", "on")
+    await sim.advance(60)
+    await sim.tick("switch.hreq_ko", "on")
+    assert mgr.companion_zones == [], mgr.companion_zones
+    assert mgr.zone_status("KO") == "heating"
+    assert not mgr.winding_down, mgr.winding_down
+    await sim.advance(120)
+    assert on_now(sim) == ["BR", "KO"], on_now(sim)
+    assert not [c for c in sim.calls if c[0] == "turn_off"], sim.calls
+    print("P: companion that starts requesting just keeps running - PASS")
+
+
+async def scenario_q():
+    """No eligible companion: the requester heats alone."""
+    sim, mgr = make_heat_sim()
+    room(sim, "KO", 66.0, mode="off")   # switched off: never pulled in
+    room(sim, "LR", 66.0, mode="cool")  # wrong mode: never pulled in
+    await sim.tick("switch.hreq_br", "on")
+    assert [c[1] for c in ons(sim)] == ["switch.heat_br"], sim.calls
+    assert mgr.short_of_floor
+    # Turning LR to heat makes it eligible; it joins on that change.
+    await room_tick(sim, "LR", 66.0, mode="heat")
+    assert mgr.companion_zones == ["LR"], mgr.companion_zones
+    assert not mgr.short_of_floor
+    print("Q: no eligible zone -> heats alone; joins when one qualifies - PASS")
+
+
+async def scenario_r():
+    """A companion's thermostat switched off mid-run releases it."""
+    sim, mgr = make_heat_sim()
+    room(sim, "KO", 66.0)
+    room(sim, "LR", 70.0)  # +2.0: not eligible to start
+    await sim.tick("switch.hreq_br", "on")
+    await sim.advance(60)
+    await room_tick(sim, "KO", 66.0, mode="off")
+    assert mgr.companion_zones == [], mgr.companion_zones
+    assert "KO" in mgr.winding_down
+    print("R: companion released when its thermostat is turned off - PASS")
+
+
+async def scenario_s():
+    """Restart mid-run: an on, non-requesting zone is re-adopted."""
+    sim, mgr = make_heat_sim()
+    room(sim, "KO", 66.0)
+    sim.set_state("switch.hreq_br", "on")
+    sim.set_state("switch.heat_br", "on")
+    sim.set_state("switch.heat_ko", "on")  # companion before the restart
+    await mgr.async_reconcile()
+    assert mgr.companion_zones == ["KO"], mgr.companion_zones
+    assert not mgr.winding_down, mgr.winding_down
+    assert not sim.calls, sim.calls
+    print("S: restart re-adopts the running companion, no switching - PASS")
+
+
+async def scenario_t():
+    """min_zones 0 (every cooling entry): never a companion."""
+    sim, mgr = make_heat_sim(min_zones=0)
+    room(sim, "KO", 60.0)
+    await sim.tick("switch.hreq_br", "on")
+    assert [c[1] for c in ons(sim)] == ["switch.heat_br"], sim.calls
+    assert not mgr.short_of_floor
+    print("T: floor off -> plain behavior - PASS")
+
+
 async def main():
     for scen in (scenario_a, scenario_a2, scenario_b, scenario_c,
                  scenario_d, scenario_e, scenario_f, scenario_g,
-                 scenario_h, scenario_i, scenario_j, scenario_k):
+                 scenario_h, scenario_i, scenario_j, scenario_k,
+                 scenario_l, scenario_m, scenario_n, scenario_o,
+                 scenario_p, scenario_q, scenario_r, scenario_s,
+                 scenario_t):
         await scen()
     print("\nall scenarios passed")
 

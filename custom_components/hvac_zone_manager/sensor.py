@@ -16,21 +16,35 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import DOMAIN, MODE_HEATING
 from .manager import CoolingZoneManager
 
 # The runtime sensors poll on this cadence so their values keep ticking
 # while a zone is running between state changes.
 SCAN_INTERVAL = timedelta(seconds=30)
 
-ZONE_STATES = ["cooling", "winding_down", "cooldown", "waiting", "idle"]
+ZONE_STATES = [
+    "cooling",
+    "heating",
+    "companion",
+    "winding_down",
+    "cooldown",
+    "waiting",
+    "idle",
+]
 
 STATE_ICONS = {
     "cooling": "mdi:snowflake",
+    "heating": "mdi:fire",
+    "companion": "mdi:link-variant",
     "winding_down": "mdi:snowflake-melt",
     "cooldown": "mdi:snowflake-off",
     "waiting": "mdi:timer-sand",
     "idle": "mdi:power-standby",
+}
+HEATING_ICONS = {
+    "winding_down": "mdi:fire-off",
+    "cooldown": "mdi:fire-off",
 }
 
 
@@ -112,12 +126,16 @@ class ZoneStatusSensor(_ManagerSensor):
             "outdoor_temp": manager.outdoor_temp,
             "temp_allowed_zones": manager.temp_allowed_zones,
             "effective_max_zones": manager.effective_max_zones,
+            "mode": manager.mode,
+            "min_zones": manager.min_zones,
+            "companions": manager.companion_zones,
+            "short_of_min_zones": manager.short_of_floor,
             "zones": {
                 zone.name: {
                     "status": manager.zone_status(zone.name),
                     "priority": manager.zone_priority(zone.name),
                     "requesting": manager.zone_requesting(zone.name),
-                    "cooling": manager.zone_cooling(zone.name),
+                    manager.active_word: manager.zone_cooling(zone.name),
                     "cycle_runtime_seconds": round(
                         manager.zone_cycle_runtime(zone.name)
                     ),
@@ -149,7 +167,10 @@ class ZoneDetailSensor(_ManagerSensor):
 
     @property
     def icon(self) -> str:
-        return STATE_ICONS.get(self.native_value, "mdi:hvac")
+        state = self.native_value
+        if self._manager.mode == MODE_HEATING and state in HEATING_ICONS:
+            return HEATING_ICONS[state]
+        return STATE_ICONS.get(state, "mdi:hvac")
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -165,7 +186,9 @@ class ZoneDetailSensor(_ManagerSensor):
             "request_entity": zone.request_entity,
             "request_on": manager.zone_requesting(name),
             "switch_entity": zone.switch_entity,
-            "cooling_on": manager.zone_cooling(name),
+            f"{manager.active_word}_on": manager.zone_cooling(name),
+            "companion": name in manager.companion_zones,
+            "climate_entity": zone.climate_entity,
             "priority": manager.zone_priority(name),
             "preempted": name in manager.preempted_zones,
             "started_at": started.isoformat() if started else None,

@@ -3,6 +3,35 @@
 All notable changes to the HVAC Zone Manager integration (named Cooling Zone
 Manager before 2.0.0) are documented here.
 
+## 2.1.0 — 2026-10-16
+
+### Added — heating mode
+
+- **Mode** on the first setup screen: an entry manages either cooling or
+  heating. Entries made before 2.1.0 have no mode and stay cooling, unchanged.
+- **Min zones** (heating entries, default `2`, `0`/`1` = off): when a zone
+  calls for heat and fewer zones are running, the manager pulls in a
+  **companion** — the zone furthest below its own setpoint whose thermostat
+  is in heat mode — so the furnace never runs one zone alone.
+- **Companion overshoot** (heating entries, default 2 °F / 1 °C): a companion
+  gives its slot back once its room passes setpoint + this margin, handing
+  off through the normal overlap; half a degree of hysteresis keeps it from
+  being picked straight back up. It also steps aside for a second real call,
+  when the requester is satisfied, or when its own room starts asking.
+- If no zone qualifies, the requester runs alone and the Active zones sensor
+  shows `short_of_min_zones: true` — the floor never keeps a room cold.
+- An optional **thermostat** (climate entity) per zone, in the setup and
+  add-zone forms. Companions need it; cooling doesn't use it.
+- New status **`companion`**; zone status reads **`heating`** on a heating
+  entry. The Active zones sensor gained `mode`, `min_zones`, `companions` and
+  `short_of_min_zones`; zone status sensors gained `companion` and
+  `climate_entity`. The cooldown number is named **Furnace cooldown** on a
+  heating entry.
+- `tools/sim.py` scenarios L–T cover the floor.
+
+Cooling entries behave exactly as in 2.0.0 (all twelve existing simulation
+scenarios pass unchanged).
+
 ## 2.0.0 — 2026-10-16
 
 ### Breaking — renamed to HVAC Zone Manager

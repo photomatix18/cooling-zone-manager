@@ -4,7 +4,7 @@
 
 # HVAC Zone Manager
 
-A custom Home Assistant integration that lets **at most N cooling zones run at the same time**, with round-robin fairness and an overlap window when one zone hands off to the next. Everything is configured in the Home Assistant UI — no YAML, no automations, no helpers to create.
+A custom Home Assistant integration that arbitrates HVAC zones: **at most N cooling zones at the same time** and, for heating, **at least N zones together** so the furnace never runs one zone alone — with round-robin fairness and an overlap window when one zone hands off to the next. Everything is configured in the Home Assistant UI — no YAML, no automations, no helpers to create.
 
 ## What it does
 
@@ -82,7 +82,7 @@ The **Compressor cooldown** number (minutes, default `5`, `0` = off) closes that
 - It survives restarts: the off-time is persisted, so rebooting Home Assistant right after the system goes quiet doesn't lose the cooldown.
 - It only governs what **this manager starts**. Flipping a zone switch on by hand during the cooldown is taken as a deliberate override and is left alone.
 
-When a heating manager entry exists someday, it gets its own independent cooldown knob — cooling and heating can differ, or either can be `0`.
+A heating entry has its own independent knob, named **Furnace cooldown** — cooling and heating can differ, or either can be `0`.
 
 ## Zone priorities
 
@@ -119,6 +119,23 @@ automation:
 ```
 
 ---
+
+## Heating mode — a floor instead of a ceiling (2.1.0)
+
+One entry manages one direction. Add the integration twice over the same rooms: a **Cooling** entry (everything above) and a **Heating** entry, picked with the **Mode** field on the first setup screen. Each has its own numbers, its own cooldown, and its own entities.
+
+A furnace usually *can* carry every zone at once, so heating rarely needs the ceiling. What it needs is the opposite: **one zone alone is too little load.** A heating entry has a **Min zones** number (default `2`, `0` or `1` = off):
+
+- When a zone calls for heat and fewer than Min zones are running, the manager pulls in a **companion** — a zone run for the furnace's sake, not because its room asked. Its status shows **`companion`**, and the Active zones sensor lists `companions`.
+- The companion is the zone **furthest below its own setpoint**, read from the zone's **thermostat** (the optional climate entity on each zone). A zone whose thermostat is not in heat mode — switched off, or left on cool — is **never** pulled in.
+- **It gives its slot back** once its room passes setpoint + **Companion overshoot** (default 2 °F / 1 °C), handing off through the normal overlap to the next-neediest zone if there is one. It is not picked again until it has dropped half a degree back inside the margin.
+- It also steps aside the moment it isn't needed: a second real call for heat, the requester being satisfied (then everything stops together and the **Furnace cooldown** applies), or its own room starting to ask (it simply becomes a normal heating zone — no blink).
+- **If no zone qualifies, the requester heats alone** and the Active zones sensor shows `short_of_min_zones: true`. The floor never stops a room from heating.
+- After a restart, a zone that is on without a request is adopted back as a companion rather than switched off.
+
+Leave the outdoor temperature sensor empty on a heating entry — its thresholds only make sense for cooling. Max zones, max run time, priorities and the overlap work exactly as for cooling; with Max zones at the zone count, the ceiling never bites.
+
+> Cooling and heating entries don't coordinate with each other. If one room's thermostat is on heat while another's is on cool, each entry will happily run its own. Keep the thermostats in the same mode, or interlock them yourself.
 
 ## Installation
 

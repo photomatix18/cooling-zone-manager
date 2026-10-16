@@ -3,32 +3,34 @@
     "step": {
       "user": {
         "title": "HVAC Zone Manager",
-        "description": "Global settings. You can change all of these later from the Max zones, Overlap time, Max zone run time, and Compressor cooldown entities this integration creates.",
+        "description": "Global settings. One entry manages one direction: make a Cooling entry and, separately, a Heating entry over the same rooms. You can change the numbers later from the entities this integration creates.",
         "data": {
           "name": "Name",
-          "max_zones": "Maximum zones cooling at the same time",
+          "max_zones": "Maximum zones running at the same time",
           "overlap_seconds": "Overlap / wind-down time (seconds)",
           "max_run_minutes": "Max zone run time in minutes, 0 = no limit (a zone running this long is rotated out if other zones are waiting)",
           "cooldown_minutes": "Compressor cooldown in minutes, 0 = off (once every zone is off, no zone may start again until this much time has passed)",
-          "temp_sensor": "Outdoor temperature sensor (optional — lets the outdoor temperature limit how many zones may run at once)"
+          "temp_sensor": "Outdoor temperature sensor (optional, cooling only — lets the outdoor temperature limit how many zones may run at once)",
+          "mode": "Mode — cooling caps how many zones run at once; heating adds a floor (Min zones) so one zone never runs alone"
         }
       },
       "zone": {
-        "title": "Add a cooling zone",
-        "description": "Zones added so far: {zone_count}. Each zone needs the entity that signals cooling demand (the request) and the entity that actually runs the cooling.",
+        "title": "Add a zone",
+        "description": "Zones added so far: {zone_count}. Each zone needs the entity that signals demand (the request) and the entity that actually runs the equipment. For heating, also pick the zone's thermostat: it decides which zone joins as a companion and when it gives back.",
         "data": {
           "name": "Zone name (e.g. bedrooms)",
           "request_entity": "Request entity (the demand signal, read-only)",
-          "switch_entity": "Cooling switch (what gets turned on and off)",
-          "add_another": "Add another zone after this one"
+          "switch_entity": "Zone switch (what gets turned on and off)",
+          "add_another": "Add another zone after this one",
+          "climate_entity": "Thermostat (optional; needed for heating companions)"
         }
       }
     },
     "error": {
       "empty_name": "Please enter a zone name.",
       "duplicate_name": "A zone with this name was already added.",
-      "duplicate_switch": "This cooling switch is already used by another zone.",
-      "same_entity": "The request entity and the cooling switch must be different entities."
+      "duplicate_switch": "This zone switch is already used by another zone.",
+      "same_entity": "The request entity and the zone switch must be different entities."
     }
   },
   "options": {
@@ -49,18 +51,19 @@
         }
       },
       "add_zone": {
-        "title": "Add a cooling zone",
+        "title": "Add a zone",
         "description": "Current zones: {zone_count}. The new zone joins the rotation immediately.",
         "data": {
           "name": "Zone name (e.g. bedrooms)",
           "request_entity": "Request entity (the demand signal, read-only)",
-          "switch_entity": "Cooling switch (what gets turned on and off)",
-          "add_another": "Add another zone after this one"
+          "switch_entity": "Zone switch (what gets turned on and off)",
+          "add_another": "Add another zone after this one",
+          "climate_entity": "Thermostat (optional; needed for heating companions)"
         }
       },
       "remove_zone": {
         "title": "Remove zones",
-        "description": "Removed zones are switched off if they are currently cooling. At least one zone must remain.",
+        "description": "Removed zones are switched off if they are currently running. At least one zone must remain.",
         "data": {
           "zones": "Zones to remove"
         }
@@ -69,10 +72,18 @@
     "error": {
       "empty_name": "Please enter a zone name.",
       "duplicate_name": "A zone with this name already exists.",
-      "duplicate_switch": "This cooling switch is already used by another zone.",
-      "same_entity": "The request entity and the cooling switch must be different entities.",
+      "duplicate_switch": "This zone switch is already used by another zone.",
+      "same_entity": "The request entity and the zone switch must be different entities.",
       "no_zones_selected": "Select at least one zone to remove.",
       "keep_one_zone": "At least one zone must remain."
+    }
+  },
+  "selector": {
+    "mode": {
+      "options": {
+        "cooling": "Cooling",
+        "heating": "Heating"
+      }
     }
   }
 }

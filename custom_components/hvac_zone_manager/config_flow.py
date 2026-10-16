@@ -12,9 +12,12 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_ADD_ANOTHER,
+    CONF_CLIMATE_ENTITY,
     CONF_COOLDOWN_MINUTES,
     CONF_MAX_RUN_MINUTES,
     CONF_MAX_ZONES,
+    CONF_MIN_ZONES,
+    CONF_MODE,
     CONF_OVERLAP,
     CONF_REQUEST_ENTITY,
     CONF_SWITCH_ENTITY,
@@ -24,9 +27,13 @@ from .const import (
     DEFAULT_COOLDOWN_MINUTES,
     DEFAULT_MAX_RUN_MINUTES,
     DEFAULT_MAX_ZONES,
+    DEFAULT_MIN_ZONES_HEATING,
     DEFAULT_NAME,
     DEFAULT_OVERLAP,
     DOMAIN,
+    MODE_COOLING,
+    MODE_HEATING,
+    MODES,
 )
 
 REQUEST_DOMAINS = ["switch", "input_boolean", "binary_sensor", "light"]
@@ -61,6 +68,13 @@ class CoolingZoneManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         schema = vol.Schema(
             {
                 vol.Required(CONF_NAME, default=DEFAULT_NAME): str,
+                vol.Required(CONF_MODE, default=MODE_COOLING): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=MODES,
+                        translation_key=CONF_MODE,
+                        mode=selector.SelectSelectorMode.LIST,
+                    )
+                ),
                 vol.Required(
                     CONF_MAX_ZONES, default=DEFAULT_MAX_ZONES
                 ): selector.NumberSelector(
@@ -123,13 +137,7 @@ class CoolingZoneManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors = _validate_zone(self._zones, name, request, switch)
 
             if not errors:
-                self._zones.append(
-                    {
-                        CONF_ZONE_NAME: name,
-                        CONF_REQUEST_ENTITY: request,
-                        CONF_SWITCH_ENTITY: switch,
-                    }
-                )
+                self._zones.append(_zone_dict(name, request, switch, user_input))
                 if user_input.get(CONF_ADD_ANOTHER):
                     return await self.async_step_zone()
                 data = {
@@ -147,6 +155,10 @@ class CoolingZoneManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         )
                     ),
                 }
+                mode = self._settings.get(CONF_MODE, MODE_COOLING)
+                data[CONF_MODE] = mode
+                if mode == MODE_HEATING:
+                    data[CONF_MIN_ZONES] = DEFAULT_MIN_ZONES_HEATING
                 if self._settings.get(CONF_TEMP_SENSOR):
                     data[CONF_TEMP_SENSOR] = self._settings[CONF_TEMP_SENSOR]
                 return self.async_create_entry(
@@ -163,6 +175,9 @@ class CoolingZoneManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_SWITCH_ENTITY): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain=SWITCH_DOMAINS)
                 ),
+                vol.Optional(CONF_CLIMATE_ENTITY): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="climate")
+                ),
                 vol.Optional(CONF_ADD_ANOTHER, default=False): selector.BooleanSelector(),
             }
         )
@@ -172,6 +187,20 @@ class CoolingZoneManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders={"zone_count": str(len(self._zones))},
         )
+
+
+def _zone_dict(
+    name: str, request: str, switch: str, user_input: dict[str, Any]
+) -> dict[str, str]:
+    """A zone as stored in the entry; the thermostat is optional."""
+    zone = {
+        CONF_ZONE_NAME: name,
+        CONF_REQUEST_ENTITY: request,
+        CONF_SWITCH_ENTITY: switch,
+    }
+    if user_input.get(CONF_CLIMATE_ENTITY):
+        zone[CONF_CLIMATE_ENTITY] = user_input[CONF_CLIMATE_ENTITY]
+    return zone
 
 
 def _validate_zone(
@@ -255,13 +284,7 @@ class CoolingZoneOptionsFlow(config_entries.OptionsFlow):
             switch = user_input[CONF_SWITCH_ENTITY]
             errors = _validate_zone(zones, name, request, switch)
             if not errors:
-                zones.append(
-                    {
-                        CONF_ZONE_NAME: name,
-                        CONF_REQUEST_ENTITY: request,
-                        CONF_SWITCH_ENTITY: switch,
-                    }
-                )
+                zones.append(_zone_dict(name, request, switch, user_input))
                 self._update_data({**self.config_entry.data, CONF_ZONES: zones})
                 if user_input.get(CONF_ADD_ANOTHER):
                     return await self.async_step_add_zone()
@@ -275,6 +298,9 @@ class CoolingZoneOptionsFlow(config_entries.OptionsFlow):
                 ),
                 vol.Required(CONF_SWITCH_ENTITY): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain=SWITCH_DOMAINS)
+                ),
+                vol.Optional(CONF_CLIMATE_ENTITY): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="climate")
                 ),
                 vol.Optional(CONF_ADD_ANOTHER, default=False): selector.BooleanSelector(),
             }
