@@ -1,4 +1,4 @@
-"""Sensors for the Cooling Zone Manager: fleet status, per-zone status,
+"""Sensors for the HVAC Zone Manager: fleet status, per-zone status,
 and runtime tracking."""
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ class _ManagerSensor(SensorEntity):
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name=entry.title,
-            manufacturer="Cooling Zone Manager",
+            manufacturer="HVAC Zone Manager",
             model="Zone arbiter",
             sw_version=manager.version,
         )

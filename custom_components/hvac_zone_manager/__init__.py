@@ -1,4 +1,4 @@
-"""The Cooling Zone Manager integration."""
+"""The HVAC Zone Manager integration."""
 from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
@@ -26,7 +26,7 @@ PLATFORMS = [Platform.NUMBER, Platform.SENSOR]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Cooling Zone Manager from a config entry."""
+    """Set up HVAC Zone Manager from a config entry."""
     zones = [Zone(**zone) for zone in entry.data[CONF_ZONES]]
     if CONF_MAX_RUN_MINUTES in entry.data:
         max_run_seconds = int(entry.data[CONF_MAX_RUN_MINUTES]) * 60

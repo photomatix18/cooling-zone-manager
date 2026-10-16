@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/icon.png" width="128" alt="Cooling Zone Manager icon">
+  <img src="assets/icon.png" width="128" alt="HVAC Zone Manager icon">
 </p>
 
-# Cooling Zone Manager
+# HVAC Zone Manager
 
 A custom Home Assistant integration that lets **at most N cooling zones run at the same time**, with round-robin fairness and an overlap window when one zone hands off to the next. Everything is configured in the Home Assistant UI — no YAML, no automations, no helpers to create.
 
@@ -23,22 +23,22 @@ A custom Home Assistant integration that lets **at most N cooling zones run at t
 
 ## Entities it creates
 
-One device ("Cooling Zone Manager") showing the installed **version**, with these entities:
+One device ("HVAC Zone Manager") showing the installed **version**, with these entities:
 
 | Entity | Purpose |
 |---|---|
-| `number.cooling_zone_manager_max_zones` | Max zones allowed at once — change it any time |
-| `number.cooling_zone_manager_overlap_time` | Overlap / wind-down time in seconds |
-| `number.cooling_zone_manager_max_zone_run_time` | Longest a zone may cool while others wait, in minutes (`0` = no limit) |
-| `number.cooling_zone_manager_compressor_cooldown` | Minimum compressor off time in minutes once every zone is off (`0` = off, default `5`) |
-| `number.cooling_zone_manager_<zone>_priority` | One per zone: the zone's priority, `1`–`3` (see **Zone priorities** below) |
-| `sensor.cooling_zone_manager_active_zones` | How many zones are cooling now; attributes show active / requesting / winding-down / waiting / preempted zones, the round-robin order, the cooldown, a per-zone detail map, and the version |
-| `sensor.cooling_zone_manager_cooldown_ends` | When the compressor cooldown ends — a live countdown while it runs, `unknown` otherwise |
-| `sensor.cooling_zone_manager_<zone>_status` | One per zone: `cooling`, `winding_down`, `cooldown`, `waiting`, or `idle`, with the request state, actual switch state, cycle runtime, and every pending countdown as attributes |
-| `sensor.cooling_zone_manager_<zone>_countdown` | One per zone: the zone's next scheduled transition as a live countdown, with a `countdown_type` attribute naming it (see **Watching it work**) |
-| `sensor.cooling_zone_manager_<zone>_runtime` | One per zone: how long the **current run** has been cooling. Resets when the zone starts; holds the last run's duration while off (`running` attribute says which) |
-| `sensor.cooling_zone_manager_total_runtime` | Cooling time across all zones for the **current session**. Resets when a zone requests again after everything was satisfied |
-| `number.cooling_zone_manager_allow_2_zones_below` etc. | Only when an outdoor temperature sensor is configured: one threshold per zone beyond the first (see below) |
+| `number.hvac_zone_manager_max_zones` | Max zones allowed at once — change it any time |
+| `number.hvac_zone_manager_overlap_time` | Overlap / wind-down time in seconds |
+| `number.hvac_zone_manager_max_zone_run_time` | Longest a zone may cool while others wait, in minutes (`0` = no limit) |
+| `number.hvac_zone_manager_compressor_cooldown` | Minimum compressor off time in minutes once every zone is off (`0` = off, default `5`) |
+| `number.hvac_zone_manager_<zone>_priority` | One per zone: the zone's priority, `1`–`3` (see **Zone priorities** below) |
+| `sensor.hvac_zone_manager_active_zones` | How many zones are cooling now; attributes show active / requesting / winding-down / waiting / preempted zones, the round-robin order, the cooldown, a per-zone detail map, and the version |
+| `sensor.hvac_zone_manager_cooldown_ends` | When the compressor cooldown ends — a live countdown while it runs, `unknown` otherwise |
+| `sensor.hvac_zone_manager_<zone>_status` | One per zone: `cooling`, `winding_down`, `cooldown`, `waiting`, or `idle`, with the request state, actual switch state, cycle runtime, and every pending countdown as attributes |
+| `sensor.hvac_zone_manager_<zone>_countdown` | One per zone: the zone's next scheduled transition as a live countdown, with a `countdown_type` attribute naming it (see **Watching it work**) |
+| `sensor.hvac_zone_manager_<zone>_runtime` | One per zone: how long the **current run** has been cooling. Resets when the zone starts; holds the last run's duration while off (`running` attribute says which) |
+| `sensor.hvac_zone_manager_total_runtime` | Cooling time across all zones for the **current session**. Resets when a zone requests again after everything was satisfied |
+| `number.hvac_zone_manager_allow_2_zones_below` etc. | Only when an outdoor temperature sensor is configured: one threshold per zone beyond the first (see below) |
 
 The numbers remember their values across restarts, so they replace the old `input_number` helpers. The runtime tracking persists across restarts too.
 
@@ -106,7 +106,7 @@ automation:
         at: "21:30:00"
     actions:
       - action: number.set_value
-        target: {entity_id: number.cooling_zone_manager_bedrooms_priority}
+        target: {entity_id: number.hvac_zone_manager_bedrooms_priority}
         data: {value: 1}
   - alias: "Bedrooms back to normal in the morning"
     triggers:
@@ -114,7 +114,7 @@ automation:
         at: "08:00:00"
     actions:
       - action: number.set_value
-        target: {entity_id: number.cooling_zone_manager_bedrooms_priority}
+        target: {entity_id: number.hvac_zone_manager_bedrooms_priority}
         data: {value: 2}
 ```
 
@@ -125,7 +125,7 @@ automation:
 ### Option A — Direct copy (fastest, no GitHub account needed)
 
 1. Download and extract this repository's ZIP file on your computer.
-2. Copy the folder `custom_components/cooling_zone_manager` into your Home Assistant `config/custom_components/` folder (create `custom_components` if it doesn't exist). The easiest ways to reach the config folder are the **Samba share** add-on (browse to it like a network drive) or the **File editor** / **Studio Code Server** add-on.
+2. Copy the folder `custom_components/hvac_zone_manager` into your Home Assistant `config/custom_components/` folder (create `custom_components` if it doesn't exist). The easiest ways to reach the config folder are the **Samba share** add-on (browse to it like a network drive) or the **File editor** / **Studio Code Server** add-on.
 3. Restart Home Assistant (Settings → System → Restart).
 4. Jump to **Configuration** below.
 
@@ -140,7 +140,7 @@ HACS installs integrations from GitHub repositories, so this repo needs to live 
 **Step 2 — Create the repository**
 
 1. Once signed in, click the **+** button in the top-right corner → **New repository**.
-2. Repository name: `cooling-zone-manager`
+2. Repository name: `hvac-zone-manager`
 3. Description: `Round-robin cooling zone arbiter for Home Assistant` — **don't skip this; HACS requires the repository to have a description.**
 4. Leave it set to **Public**, leave every checkbox (README, .gitignore, license) **unchecked**, and click **Create repository**.
 
@@ -155,16 +155,16 @@ HACS installs integrations from GitHub repositories, so this repo needs to live 
 
 1. In Home Assistant, open **HACS** in the sidebar.
 2. Click the **⋮ (three-dot) menu** in the top-right → **Custom repositories**.
-3. Repository: paste your repo's address: `https://github.com/photomatix18/cooling-zone-manager`
+3. Repository: paste your repo's address: `https://github.com/photomatix18/hvac-zone-manager`
 4. Type: **Integration** → click **Add**, then close the dialog.
-5. In HACS, search for **Cooling Zone Manager**, open it, and click **Download**.
+5. In HACS, search for **HVAC Zone Manager**, open it, and click **Download**.
 6. Restart Home Assistant when prompted.
 
 ---
 
 ## Configuration
 
-1. Go to **Settings → Devices & Services → + Add Integration** and search for **Cooling Zone Manager**.
+1. Go to **Settings → Devices & Services → + Add Integration** and search for **HVAC Zone Manager**.
 2. First screen: pick a name, the max zones (e.g. `2`), overlap seconds (e.g. `15`), max zone run time in minutes (e.g. `60` for 1 hour, or `0` for no limit), the compressor cooldown in minutes (e.g. `5`, or `0` for none), and optionally an outdoor temperature sensor for temperature-aware capacity.
 3. Then add each zone one at a time. Example for a three-zone setup:
 
@@ -204,7 +204,7 @@ The status sensor's attributes show live state. For a play-by-play in the log, a
 ```yaml
 logger:
   logs:
-    custom_components.cooling_zone_manager: info
+    custom_components.hvac_zone_manager: info
 ```
 
 Every start, wind-down, re-admit, and shutoff is then logged under Settings → System → Logs.
@@ -212,8 +212,8 @@ Every start, wind-down, re-admit, and shutoff is then logged under Settings → 
 ## Changing things later
 
 - **Max zones / overlap / max run time / compressor cooldown / temperature thresholds:** change the number entities any time (dashboard, automations, voice — anything that can set a number).
-- **Add or remove zones, or change the outdoor temperature sensor:** Settings → Devices & Services → Cooling Zone Manager → **Configure**. Changes apply immediately; removed zones are switched off first if they're cooling. (Renaming a zone = remove it, then add it with the new name.)
-- **Updating the code:** if the files change, upload the new versions to the GitHub repo the same drag-and-drop way (GitHub → **Add file → Upload files**) and raise the `"version"` number in `custom_components/cooling_zone_manager/manifest.json` (e.g. `1.1.0` → `1.1.1`). HACS will then offer the update, and after restarting you can confirm the new version on the integration's device page. What changed in each release is listed in [CHANGELOG.md](CHANGELOG.md).
+- **Add or remove zones, or change the outdoor temperature sensor:** Settings → Devices & Services → HVAC Zone Manager → **Configure**. Changes apply immediately; removed zones are switched off first if they're cooling. (Renaming a zone = remove it, then add it with the new name.)
+- **Updating the code:** if the files change, upload the new versions to the GitHub repo the same drag-and-drop way (GitHub → **Add file → Upload files**) and raise the `"version"` number in `custom_components/hvac_zone_manager/manifest.json` (e.g. `1.1.0` → `1.1.1`). HACS will then offer the update, and after restarting you can confirm the new version on the integration's device page. What changed in each release is listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## How the handoff works (details)
 

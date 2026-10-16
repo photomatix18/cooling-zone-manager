@@ -1,6 +1,33 @@
 # Changelog
 
-All notable changes to the Cooling Zone Manager integration are documented here.
+All notable changes to the HVAC Zone Manager integration (named Cooling Zone
+Manager before 2.0.0) are documented here.
+
+## 2.0.0 — 2026-10-16
+
+### Breaking — renamed to HVAC Zone Manager
+
+The integration started cooling-only and is headed for heating as well, so it
+is renamed. **The domain changes from `cooling_zone_manager` to
+`hvac_zone_manager`**, and Home Assistant has no migration path for a domain
+change — this is a delete-and-re-add:
+
+1. Note the current values of every number entity (max zones, overlap, max run
+   time, compressor cooldown, priorities, temperature thresholds).
+2. Copy `custom_components/hvac_zone_manager` in alongside the old folder and
+   restart.
+3. Add **HVAC Zone Manager** from Devices & Services, re-enter the zones and
+   settings, and set the numbers back to what they were.
+4. Delete the old **Cooling Zone Manager** entry, remove
+   `custom_components/cooling_zone_manager`, and restart again.
+5. Repoint dashboards and automations: every entity ID changes
+   (`…cooling_zone_manager_…` → `…<new entry title>_…`), recorder history
+   starts fresh, and the stored round-robin order and runtime totals reset.
+   The logger key becomes `custom_components.hvac_zone_manager`.
+
+Nothing else changed in this release — behavior is identical to 1.6.0. The
+GitHub repository moved to `photomatix18/hvac-zone-manager` (the old URL
+redirects).
 
 ## 1.6.0 — 2026-08-17
 

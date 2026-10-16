@@ -1,6 +1,6 @@
-"""Constants for the Cooling Zone Manager integration."""
+"""Constants for the HVAC Zone Manager integration."""
 
-DOMAIN = "cooling_zone_manager"
+DOMAIN = "hvac_zone_manager"
 
 CONF_ZONES = "zones"
 CONF_ZONE_NAME = "name"
@@ -48,7 +48,7 @@ TEMP_STARTUP_GRACE = 300
 # capacity shed switches the first one off ~50 s after it started).
 PENDING_GRACE = 60
 
-DEFAULT_NAME = "Cooling Zone Manager"
+DEFAULT_NAME = "HVAC Zone Manager"
 DEFAULT_MAX_ZONES = 2
 DEFAULT_OVERLAP = 15
 # 0 disables the max-run rotation.

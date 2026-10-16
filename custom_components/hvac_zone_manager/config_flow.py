@@ -1,4 +1,4 @@
-"""Config flow for Cooling Zone Manager."""
+"""Config flow for HVAC Zone Manager."""
 from __future__ import annotations
 
 from typing import Any

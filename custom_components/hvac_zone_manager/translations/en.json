@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "Cooling Zone Manager",
+        "title": "HVAC Zone Manager",
         "description": "Global settings. You can change all of these later from the Max zones, Overlap time, Max zone run time, and Compressor cooldown entities this integration creates.",
         "data": {
           "name": "Name",
@@ -34,7 +34,7 @@
   "options": {
     "step": {
       "init": {
-        "title": "Cooling Zone Manager",
+        "title": "HVAC Zone Manager",
         "menu_options": {
           "temp_sensor": "Outdoor temperature sensor",
           "add_zone": "Add a zone",

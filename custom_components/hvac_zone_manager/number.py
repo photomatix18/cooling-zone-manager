@@ -48,7 +48,7 @@ class _ManagerNumber(RestoreNumber):
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name=entry.title,
-            manufacturer="Cooling Zone Manager",
+            manufacturer="HVAC Zone Manager",
             model="Zone arbiter",
             sw_version=manager.version,
         )

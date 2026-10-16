@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PKG_DIR = os.path.join(REPO, "custom_components", "cooling_zone_manager")
+PKG_DIR = os.path.join(REPO, "custom_components", "hvac_zone_manager")
 
 CURRENT_SIM = None
 

@@ -1,0 +1,13 @@
+{
+  "domain": "hvac_zone_manager",
+  "name": "HVAC Zone Manager",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/photomatix18/hvac-zone-manager",
+  "integration_type": "hub",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/photomatix18/hvac-zone-manager/issues",
+  "requirements": [],
+  "version": "2.0.0"
+}
