@@ -47,6 +47,23 @@ Same behavior as the YAML v2 automation, implemented natively:
   arrive, or when the last requester is satisfied. If no zone is
   eligible, the requester runs alone — the floor never keeps a room from
   heating.
+* An outdoor lockout (``lockout_temp``, needs the outdoor sensor): a
+  cooling entry never runs below it, a heating entry never above it, with
+  ``TEMP_HYSTERESIS`` on the way back. Crossing it winds every running
+  zone down through the normal overlap; nothing starts until it clears.
+* Changeover between a cooling and a heating entry on the same equipment
+  (they find each other through ``hass.data``):
+  - Interlock: neither starts while the other has any zone on.
+  - Delay: after the other direction ran last, this one waits until it
+    has been off ``changeover_delay`` seconds.
+  - Band: then, for a zone whose thermostat is in ``auto``/``heat_cool``,
+    only once its room is ``changeover_band`` past setpoint in this
+    direction. Within a direction the thermostat cycles on its own small
+    tolerance; switching direction takes a real swing. A thermostat in an
+    explicit heat/cool mode skips the band — someone chose the direction.
+  Once a zone starts, this direction is the latest to run and the gate is
+  gone until the other side runs again. A zone without its own climate
+  entity borrows the one of the same-named zone in the other entry.
 * Everything is re-derived from live entity states on every pass, so the
   manager self-heals after restarts, reloads, or manual switch changes.
   The one exception is the manager's own recent commands: a template
@@ -77,6 +94,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CHANGEOVER_BAND_RECHECK,
     COMPANION_HYSTERESIS,
     DEFAULT_PRIORITY,
     DOMAIN,
@@ -151,6 +169,17 @@ class CoolingZoneManager:
         # Last outdoor reading and the zone count it currently allows.
         self.outdoor_temp: float | None = None
         self._temp_tier: int | None = None
+        # Outdoor lockout line, pushed by its number entity; None is off.
+        self.lockout_temp: float | None = None
+        self._locked_out = False
+        # Changeover to this direction after the other one ran: minimum
+        # off time of the other side (seconds), and the room swing past
+        # setpoint an auto thermostat needs. Pushed by number entities.
+        self.changeover_delay = 0
+        self.changeover_band = 0.0
+        # Whether any zone was on at the last pass; going quiet wakes the
+        # opposite entry, which may be held by the interlock.
+        self._was_running = False
         # When the manager started; bounds the startup capacity freeze.
         self._boot = 0.0
         # Integration version, filled in by async_setup_entry for display.
@@ -417,7 +446,7 @@ class CoolingZoneManager:
 
     def zone_status(self, name: str) -> str:
         """One-word status: cooling or heating, companion, winding_down,
-        cooldown, waiting, idle."""
+        lockout, changeover, cooldown, waiting, idle."""
         if name in self._winddown:
             return "winding_down"
         if self.zone_cooling(name):
@@ -425,6 +454,10 @@ class CoolingZoneManager:
                 return "companion"
             return self.active_word
         if self.zone_requesting(name):
+            if self._locked_out:
+                return "lockout"
+            if self._changeover_holds(name):
+                return "changeover"
             if self._cooldown_until_ts() is not None:
                 return "cooldown"
             return "waiting"
@@ -535,6 +568,8 @@ class CoolingZoneManager:
           takes this slot once the compressor guard clears.
         * ``max_run_rotation`` — running; the max-run limit rotates this
           zone out then (an eligible waiter exists).
+        * ``changeover`` — waiting; the changeover delay after the other
+          direction ends then.
         * ``compressor_cooldown`` — waiting; the global cooldown ends then.
         * ``resting`` — waiting; its own rest gate opens then.
         * ``waits_for_guard`` — waiting; it evicts a lower-priority runner
@@ -595,6 +630,12 @@ class CoolingZoneManager:
         if name not in requesting:
             return None
 
+        if self._locked_out:
+            return None  # lifts on an outdoor reading, not at a known time
+        if not on:
+            _state, changeover_until = self._changeover(now)
+            if changeover_until is not None:
+                return dt_util.utc_from_timestamp(changeover_until), "changeover"
         cooldown = self._cooldown_until_ts()
         if cooldown is not None:
             return dt_util.utc_from_timestamp(cooldown), "compressor_cooldown"
@@ -686,6 +727,179 @@ class CoolingZoneManager:
                 self._temp_tier,
             )
 
+    @property
+    def locked_out(self) -> bool:
+        """True while the outdoor temperature locks this direction out."""
+        return self._locked_out
+
+    def _update_lockout(self) -> None:
+        """Re-derive the outdoor lockout, with hysteresis on the way out.
+
+        Uses the reading ``_update_temp_tier`` just took. An unreadable
+        sensor keeps the last state; before the first reading nothing is
+        locked out (fail open — the thermostats keep working as before).
+        """
+        if self.lockout_temp is None or not self.temp_entity:
+            self._locked_out = False
+            return
+        temp = self.outdoor_temp
+        if temp is None:
+            return
+        line = self.lockout_temp
+        if self.mode == MODE_HEATING:
+            past = temp > line
+            clear = temp <= line - TEMP_HYSTERESIS
+        else:
+            past = temp < line
+            clear = temp >= line + TEMP_HYSTERESIS
+        if not self._locked_out and past:
+            self._locked_out = True
+            _LOGGER.info(
+                "Outdoor temperature %.1f is %s the %s lockout (%.1f);"
+                " no zone may run",
+                temp,
+                "above" if self.mode == MODE_HEATING else "below",
+                self.active_word,
+                line,
+            )
+        elif self._locked_out and clear:
+            self._locked_out = False
+            _LOGGER.info(
+                "Outdoor temperature %.1f clears the %s lockout",
+                temp,
+                self.active_word,
+            )
+
+    # ----------------------------------------------------------- changeover
+
+    def _opposites(self) -> list[CoolingZoneManager]:
+        """Entries of the other direction, on the same equipment."""
+        managers = getattr(self.hass, "data", {}).get(DOMAIN, {})
+        return [
+            m
+            for m in managers.values()
+            if m is not self and getattr(m, "mode", self.mode) != self.mode
+        ]
+
+    def _any_on(self) -> bool:
+        return any(self._zone_on(z.name) for z in self.zones)
+
+    def _last_active(self, now: float) -> float | None:
+        """When this entry last had a zone running (now, if one still
+        is), or None if it never ran.
+
+        A run whose switch just went off but whose end this entry has not
+        booked yet (its own pass has not run) still counts as now —
+        otherwise the other entry, reconciling first, sees no history and
+        changes over with no delay at all.
+        """
+        if self._started:
+            return now
+        return max(self._last_run_end.values(), default=None)
+
+    def _changeover(self, now: float) -> tuple[str | None, float | None]:
+        """Whether starting in this direction is a changeover, and its gate.
+
+        Returns (state, delay_until). state is None (no changeover: this
+        direction ran last, or nothing has run), ``interlock`` (the other
+        direction has a zone on), ``delay`` (it stopped less than
+        ``changeover_delay`` ago; delay_until says when that ends), or
+        ``band`` (the delay is over; each zone must pass the band).
+        Only meaningful while none of this entry's zones is on.
+        """
+        peers = self._opposites()
+        if not peers:
+            return None, None
+        if any(peer._any_on() for peer in peers):
+            return "interlock", None
+        peer_end = max(
+            (end for peer in peers if (end := peer._last_active(now)) is not None),
+            default=None,
+        )
+        if peer_end is None:
+            return None, None
+        own_end = self._last_active(now)
+        if own_end is not None and own_end >= peer_end:
+            return None, None
+        until = peer_end + self.changeover_delay
+        if until > now:
+            return "delay", until
+        return "band", None
+
+    def _climate_for(self, name: str) -> str | None:
+        """The zone's thermostat, borrowed from the other entry if needed.
+
+        Cooling zones are usually set up without one (only companions
+        need it); the heating zone of the same name has it.
+        """
+        entity = self._by_name[name].climate_entity
+        if entity:
+            return entity
+        for peer in self._opposites():
+            zone = peer._by_name.get(name)
+            if zone is not None and zone.climate_entity:
+                return zone.climate_entity
+        return None
+
+    def _band_ok(self, name: str) -> bool:
+        """Has the zone's room swung far enough to change direction?
+
+        Applies only to a thermostat in ``auto``/``heat_cool``; one set
+        to an explicit mode has had its direction chosen for it. Unknown
+        thermostat or temperatures pass (the delay still applied).
+        """
+        if self.changeover_band <= 0:
+            return True
+        entity = self._climate_for(name)
+        state = self.hass.states.get(entity) if entity else None
+        if state is None or state.state not in ("auto", "heat_cool"):
+            return True
+        attrs = state.attributes
+        if state.state == "heat_cool":
+            key = "target_temp_low" if self.mode == MODE_HEATING else "target_temp_high"
+            target = attrs.get(key)
+        else:
+            target = attrs.get("temperature")
+        try:
+            target = float(target)
+            current = float(attrs.get("current_temperature"))
+        except (TypeError, ValueError):
+            return True
+        if self.mode == MODE_HEATING:
+            return current <= target - self.changeover_band
+        return current >= target + self.changeover_band
+
+    def _changeover_holds(self, name: str) -> bool:
+        """True while the changeover gate keeps this waiting zone off."""
+        if self._any_on():
+            return False
+        state, _until = self._changeover(dt_util.utcnow().timestamp())
+        if state in ("interlock", "delay"):
+            return True
+        return state == "band" and not self._band_ok(name)
+
+    @property
+    def changeover_until(self) -> datetime | None:
+        """When the changeover delay ends, while it is holding this entry."""
+        if self._any_on():
+            return None
+        _state, until = self._changeover(dt_util.utcnow().timestamp())
+        return dt_util.utc_from_timestamp(until) if until else None
+
+    @property
+    def changeover_state(self) -> str | None:
+        """The changeover gate this entry faces now: interlock, delay,
+        band, or None."""
+        if self._any_on():
+            return None
+        return self._changeover(dt_util.utcnow().timestamp())[0]
+
+    @callback
+    def _wake_opposites(self) -> None:
+        """This direction went quiet; let a held opposite entry re-check."""
+        for peer in self._opposites():
+            self.hass.async_create_task(peer.async_reconcile())
+
     # -------------------------------------------------------------- events
 
     @callback
@@ -722,6 +936,7 @@ class CoolingZoneManager:
         # Effective capacity for this pass: the manual cap, possibly
         # lowered by the outdoor temperature.
         self._update_temp_tier()
+        self._update_lockout()
         limit = self.effective_max_zones
         capacity_frozen = (
             bool(self.temp_entity)
@@ -911,6 +1126,15 @@ class CoolingZoneManager:
                     self._rr.append(name)
                     self._dirty = True
 
+        # 4b) Outdoor lockout: wind every running zone down, companions
+        #     included, through the normal overlap.
+        if self._locked_out:
+            for name in self._shed_order(on - set(self._winddown)):
+                _LOGGER.info("Outdoor lockout; winding down zone '%s'", name)
+                self._preempted[name] = "lockout"
+                self._schedule_winddown(name)
+                self._dirty = True
+
         winding = set(self._winddown)
         countable = on - winding  # winding zones no longer occupy a slot
 
@@ -945,7 +1169,23 @@ class CoolingZoneManager:
         #    stable). The winding-down zones freeing their slot early is
         #    what creates the overlap: the replacement turns on now, the
         #    old zone turns off when its timer fires.
-        if cooldown_block is not None:
+        #    Gates first: the outdoor lockout, then the changeover from the
+        #    other direction (only when nothing of ours is on — once this
+        #    direction runs, the changeover is behind it).
+        changeover, changeover_until = (None, None) if on else self._changeover(now)
+        if self._locked_out:
+            pass  # lifts on an outdoor reading, which triggers a pass
+        elif changeover == "interlock":
+            if requesting:
+                _LOGGER.debug("Interlock: the other direction is running")
+        elif changeover == "delay":
+            if requesting:
+                deferred.append(changeover_until)
+                _LOGGER.debug(
+                    "Changeover delay: %.0f s before a zone may start",
+                    changeover_until - now,
+                )
+        elif cooldown_block is not None:
             if requesting:
                 deferred.append(cooldown_block)
                 _LOGGER.debug(
@@ -953,6 +1193,7 @@ class CoolingZoneManager:
                     cooldown_block - now,
                 )
         else:
+            band_held = False
             for name in sorted(self._rr, key=self.zone_priority):
                 effective = len(on) - len(winding)
                 if (
@@ -963,6 +1204,15 @@ class CoolingZoneManager:
                     # the original automation's behavior.
                     and len(on) < limit + 1
                 ):
+                    if changeover == "band" and not on and not self._band_ok(name):
+                        band_held = True
+                        continue
+                    if changeover == "band" and not on:
+                        _LOGGER.info(
+                            "Zone '%s' changes the system over to %s",
+                            name,
+                            self.active_word,
+                        )
                     self._rr.remove(name)
                     self._rr.append(name)
                     self._dirty = True
@@ -977,6 +1227,10 @@ class CoolingZoneManager:
                     # switch's state-change event, so runtime tracking and
                     # the max-run timer are already correct in this pass.
                     self._started.setdefault(name, dt_util.utcnow().timestamp())
+            if band_held and not on:
+                # The room temperature may live on another entry's
+                # thermostat this one does not track: poll while held.
+                deferred.append(now + CHANGEOVER_BAND_RECHECK)
 
             # 7b) The floor: top up with companions so a running requester
             #     never runs below min_zones (cooldown gating applies, since
@@ -1042,6 +1296,10 @@ class CoolingZoneManager:
                 self._last_run_end[name] = end
                 self._session_runtime += duration
                 self._dirty = True
+        running = bool(on)
+        if self._was_running and not running:
+            self._wake_opposites()
+        self._was_running = running
         # A marker for a zone that is definitively off belongs to a run that
         # ended while HA was down; its tail cannot be recovered, so drop it.
         # Zones still "unavailable" during startup keep their marker until
@@ -1069,7 +1327,8 @@ class CoolingZoneManager:
         if state is None:
             return False, None
         wanted_mode = "heat" if self.mode == MODE_HEATING else "cool"
-        if state.state not in (wanted_mode, "heat_cool"):
+        # "auto" is dual_smart_thermostat's single-setpoint automatic mode.
+        if state.state not in (wanted_mode, "heat_cool", "auto"):
             return False, None
         attrs = state.attributes
         if state.state == "heat_cool":
@@ -1250,7 +1509,7 @@ class CoolingZoneManager:
         now = dt_util.utcnow().timestamp()
         _LOGGER.info(
             "Re-check scheduled in %.0f s (rest gate, eviction guard,"
-            " startup grace, or compressor cooldown)",
+            " startup grace, compressor cooldown, or changeover)",
             fire_at - now,
         )
         self._rest_timer = (

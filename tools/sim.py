@@ -7,6 +7,8 @@ startup before the outdoor sensor's first reading, and the priority rules
 (gated rotation, guarded eviction) acting as designed — while all-default
 priorities reproduce the old round-robin exactly. Scenarios L-T cover
 the heating floor (v2.1.0): companions, give-back, and their edge cases.
+Scenarios U-Z cover v2.2.0: outdoor lockouts, and the changeover
+between a cooling and a heating entry (interlock, delay, band).
 
 Run with any Python 3.10+: ``python tools/sim.py`` from the repo root.
 Scenarios A/A2/F replay real incidents from a live recorder database
@@ -112,7 +114,7 @@ for sub in ("const", "manager"):
     sys.modules[f"czm.{sub}"] = mod
     spec.loader.exec_module(mod)
 
-from czm.const import MODE_HEATING  # noqa: E402
+from czm.const import DOMAIN, MODE_HEATING  # noqa: E402
 from czm.manager import CoolingZoneManager, Zone  # noqa: E402
 
 # ---------------------------------------------------------------- harness
@@ -129,6 +131,7 @@ class Sim:
         self.physical = []        # [apply_at, entity_id, state]
         self.calls = []           # (service, entity_id, at)
         self.mgr = None
+        self.others = []          # further managers sharing this hass
         self.hass = self._make_hass()
 
     def _make_hass(self):
@@ -155,6 +158,7 @@ class Sim:
         class Hass:
             states = States()
             services = Services()
+            data = {}
 
             def async_create_task(self, coro):
                 return asyncio.get_event_loop().create_task(coro)
@@ -190,7 +194,8 @@ class Sim:
                 _, eid, st = item
                 if self.states.get(eid, (None, 0))[0] != st:
                     self.set_state(eid, st)
-                    await self.mgr.async_reconcile()
+                    for mgr in [self.mgr] + self.others:
+                        await mgr.async_reconcile()
             else:
                 item[2] = False
                 item[1](None)
@@ -613,13 +618,175 @@ async def scenario_t():
     print("T: floor off -> plain behavior - PASS")
 
 
+
+# --------------------------------------------------- lockout / changeover
+
+
+def make_pair(outdoor="70.0", delay=1800, band=2.0):
+    """A cooling and a heating entry on one hass, like the live house.
+
+    Cooling zones have no climate entity (as configured live); they
+    borrow the heating zones' thermostats by name.
+    """
+    global CURRENT_SIM
+    sim = Sim()
+    CURRENT_SIM = sim
+    cool = CoolingZoneManager(
+        sim.hass, "cool", ZONES, max_zones=3, overlap=30,
+        temp_entity="sensor.outdoor",
+    )
+    heat = CoolingZoneManager(
+        sim.hass, "heat", HEAT_ZONES, max_zones=3, overlap=30,
+        temp_entity="sensor.outdoor", mode=MODE_HEATING, min_zones=0,
+    )
+    cool.lockout_temp, heat.lockout_temp = 60.0, 65.0
+    for m in (cool, heat):
+        m.changeover_delay, m.changeover_band = delay, band
+        m._boot = sim.now
+    sim.hass.data = {DOMAIN: {"cool": cool, "heat": heat}}
+    sim.mgr, sim.others = cool, [heat]
+    for z in ZONES + HEAT_ZONES:
+        sim.set_state(z.request_entity, "off")
+        sim.set_state(z.switch_entity, "off")
+    for z in HEAT_ZONES:
+        room(sim, z.name, 70.0, target=70.0, mode="auto")
+    sim.set_state("sensor.outdoor", outdoor)
+    return sim, cool, heat
+
+
+async def both(sim):
+    for m in [sim.mgr] + sim.others:
+        await m.async_reconcile()
+
+
+async def tick2(sim, eid, st):
+    sim.set_state(eid, st)
+    await both(sim)
+
+
+def turned_on(sim, eid):
+    return [c for c in sim.calls if c[0] == "turn_on" and c[1] == eid]
+
+
+async def scenario_u():
+    """Oct-18 night replay: auto at 70, heat overshoots, cooling must wait.
+
+    62 F outside: inside both lockouts, so only the changeover decides.
+    """
+    sim, cool, heat = make_pair(outdoor="62.0")
+    room(sim, "LR", 69.6, target=70.0, mode="auto")
+    await tick2(sim, "switch.hreq_lr", "on")
+    assert turned_on(sim, "switch.heat_lr"), sim.calls
+    await sim.advance(1200)
+    # Heat satisfied, room overshoots to 70.4: the thermostat asks to cool.
+    room(sim, "LR", 70.4, target=70.0, mode="auto")
+    await tick2(sim, "switch.hreq_lr", "off")
+    await tick2(sim, "switch.req_lr", "on")
+    assert cool.zone_status("LR") == "changeover", cool.zone_status("LR")
+    await sim.advance(120)  # heat winds down and confirms off
+    assert not turned_on(sim, "switch.cool_lr"), "cooled straight after heating"
+    cd = cool.zone_countdown("LR")
+    assert cd is not None and cd[1] == "changeover", cd
+    await sim.advance(1800)  # delay over, but the room is only +0.4
+    assert not turned_on(sim, "switch.cool_lr"), "band ignored: %s" % sim.calls
+    assert cool.changeover_state == "band", cool.changeover_state
+    assert cool._rest_timer is not None, "no band re-check scheduled"
+    room(sim, "LR", 72.1, target=70.0, mode="auto")  # a real swing
+    await sim.advance(90)  # the band re-check picks it up
+    assert turned_on(sim, "switch.cool_lr"), "never changed over: %s" % sim.calls
+    print("U: overshoot no longer flips to cooling; real swing does - PASS")
+
+
+async def scenario_v():
+    """Interlock: heating cannot start while cooling runs, then waits."""
+    sim, cool, heat = make_pair(outdoor="62.0")
+    room(sim, "BR", 73.0, target=70.0, mode="auto")
+    await tick2(sim, "switch.req_br", "on")
+    await sim.advance(600)
+    room(sim, "KO", 66.0, target=70.0, mode="auto")  # far past the band
+    await tick2(sim, "switch.hreq_ko", "on")
+    assert not turned_on(sim, "switch.heat_ko"), "heat ran alongside cooling"
+    assert heat.zone_status("KO") == "changeover"
+    assert heat.changeover_state == "interlock", heat.changeover_state
+    await tick2(sim, "switch.req_br", "off")
+    await sim.advance(120)  # cooling off; heating is woken into the delay
+    assert heat.changeover_state == "delay", heat.changeover_state
+    assert not turned_on(sim, "switch.heat_ko")
+    await sim.advance(1800)
+    assert turned_on(sim, "switch.heat_ko"), "heat never started: %s" % sim.calls
+    print("V: interlock, then delay, then heat starts - PASS")
+
+
+async def scenario_w():
+    """An explicit mode skips the band; the delay still applies."""
+    sim, cool, heat = make_pair(outdoor="75.0")
+    heat._last_run_end["LR"] = sim.now - 600  # heated 10 minutes ago
+    room(sim, "LR", 70.4, target=70.0, mode="cool")
+    await tick2(sim, "switch.req_lr", "on")
+    assert not turned_on(sim, "switch.cool_lr")
+    await sim.advance(1260)
+    assert turned_on(sim, "switch.cool_lr"), "explicit cool held by band"
+    print("W: explicit cool skips the band, honours the delay - PASS")
+
+
+async def scenario_x():
+    """Cooling lockout below 60: winds down, holds, clears at 61."""
+    sim, cool, heat = make_pair(outdoor="64.0", delay=0)
+    await tick2(sim, "switch.req_br", "on")
+    await sim.advance(120)
+    assert sim.states["switch.cool_br"][0] == "on"
+    await tick2(sim, "sensor.outdoor", "59.5")
+    assert cool.locked_out and "BR" in cool.winding_down, cool.winding_down
+    await sim.advance(120)
+    assert sim.states["switch.cool_br"][0] == "off"
+    assert cool.zone_status("BR") == "lockout", cool.zone_status("BR")
+    await tick2(sim, "sensor.outdoor", "60.5")  # inside the hysteresis
+    assert cool.locked_out and len(turned_on(sim, "switch.cool_br")) == 1
+    await tick2(sim, "sensor.outdoor", "61.0")
+    assert not cool.locked_out
+    await sim.advance(5)
+    assert len(turned_on(sim, "switch.cool_br")) == 2, sim.calls
+    print("X: cooling lockout with hysteresis - PASS")
+
+
+async def scenario_y():
+    """Heating lockout above 65; cooling's lockout untouched."""
+    sim, cool, heat = make_pair(outdoor="66.0", delay=0)
+    room(sim, "KO", 66.0, target=70.0, mode="heat")
+    await tick2(sim, "switch.hreq_ko", "on")
+    assert heat.locked_out and not cool.locked_out
+    assert not turned_on(sim, "switch.heat_ko")
+    await tick2(sim, "sensor.outdoor", "64.5")  # not a full degree under
+    assert heat.locked_out
+    await tick2(sim, "sensor.outdoor", "64.0")
+    assert turned_on(sim, "switch.heat_ko"), sim.calls
+    print("Y: heating lockout above 65 with hysteresis - PASS")
+
+
+async def scenario_z():
+    """Within one direction nothing changes; auto rooms can be companions."""
+    sim, cool, heat = make_pair(outdoor="50.0")
+    heat.min_zones = 2
+    room(sim, "LR", 69.6, target=70.0, mode="auto")
+    room(sim, "BR", 69.0, target=70.0, mode="auto")
+    await tick2(sim, "switch.hreq_lr", "on")
+    assert heat.companion_zones == ["BR"], heat.companion_zones
+    await sim.advance(600)
+    await tick2(sim, "switch.hreq_lr", "off")
+    await sim.advance(120)
+    await tick2(sim, "switch.hreq_lr", "on")  # same direction: no gate
+    assert len(turned_on(sim, "switch.heat_lr")) == 2, sim.calls
+    print("Z: same-direction cycling ungated; auto companions - PASS")
+
+
 async def main():
     for scen in (scenario_a, scenario_a2, scenario_b, scenario_c,
                  scenario_d, scenario_e, scenario_f, scenario_g,
                  scenario_h, scenario_i, scenario_j, scenario_k,
                  scenario_l, scenario_m, scenario_n, scenario_o,
                  scenario_p, scenario_q, scenario_r, scenario_s,
-                 scenario_t):
+                 scenario_t, scenario_u, scenario_v, scenario_w,
+                 scenario_x, scenario_y, scenario_z):
         await scen()
     print("\nall scenarios passed")
 

@@ -28,6 +28,8 @@ ZONE_STATES = [
     "heating",
     "companion",
     "winding_down",
+    "lockout",
+    "changeover",
     "cooldown",
     "waiting",
     "idle",
@@ -38,6 +40,8 @@ STATE_ICONS = {
     "heating": "mdi:fire",
     "companion": "mdi:link-variant",
     "winding_down": "mdi:snowflake-melt",
+    "lockout": "mdi:thermometer-off",
+    "changeover": "mdi:swap-horizontal",
     "cooldown": "mdi:snowflake-off",
     "waiting": "mdi:timer-sand",
     "idle": "mdi:power-standby",
@@ -126,6 +130,16 @@ class ZoneStatusSensor(_ManagerSensor):
             "outdoor_temp": manager.outdoor_temp,
             "temp_allowed_zones": manager.temp_allowed_zones,
             "effective_max_zones": manager.effective_max_zones,
+            "lockout_temp": manager.lockout_temp,
+            "locked_out": manager.locked_out,
+            "changeover_delay_seconds": manager.changeover_delay,
+            "changeover_band": manager.changeover_band,
+            "changeover": manager.changeover_state,
+            "changeover_until": (
+                manager.changeover_until.isoformat()
+                if manager.changeover_until
+                else None
+            ),
             "mode": manager.mode,
             "min_zones": manager.min_zones,
             "companions": manager.companion_zones,

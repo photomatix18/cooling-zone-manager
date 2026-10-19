@@ -8,7 +8,20 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DEFAULT_PRIORITY, DOMAIN, MODE_HEATING, PRIORITY_MAX, PRIORITY_MIN
+from .const import (
+    DEFAULT_CHANGEOVER_BAND_C,
+    DEFAULT_CHANGEOVER_BAND_F,
+    DEFAULT_CHANGEOVER_MINUTES,
+    DEFAULT_COOLING_LOCKOUT_C,
+    DEFAULT_COOLING_LOCKOUT_F,
+    DEFAULT_HEATING_LOCKOUT_C,
+    DEFAULT_HEATING_LOCKOUT_F,
+    DEFAULT_PRIORITY,
+    DOMAIN,
+    MODE_HEATING,
+    PRIORITY_MAX,
+    PRIORITY_MIN,
+)
 from .manager import CoolingZoneManager
 
 
@@ -24,17 +37,21 @@ async def async_setup_entry(
         OverlapNumber(manager, entry),
         MaxRunNumber(manager, entry),
         CooldownNumber(manager, entry),
+        ChangeoverDelayNumber(manager, entry),
+        ChangeoverBandNumber(manager, entry),
     ]
     if manager.mode == MODE_HEATING:
         entities.append(MinZonesNumber(manager, entry))
         entities.append(CompanionMarginNumber(manager, entry))
     for zone in manager.zones:
         entities.append(ZonePriorityNumber(manager, entry, zone.name))
-    # Temperature-aware capacity: one threshold per zone beyond the first,
-    # only when an outdoor temperature sensor was configured.
     if manager.temp_entity:
-        for tier in range(2, len(manager.zones) + 1):
-            entities.append(ZoneThresholdNumber(manager, entry, tier))
+        entities.append(LockoutNumber(manager, entry))
+        # Temperature-aware capacity: one threshold per zone beyond the
+        # first. Cooling only — heat output does not fall off in the cold.
+        if manager.mode != MODE_HEATING:
+            for tier in range(2, len(manager.zones) + 1):
+                entities.append(ZoneThresholdNumber(manager, entry, tier))
     async_add_entities(entities)
 
 
@@ -242,6 +259,91 @@ class ZonePriorityNumber(_ManagerNumber):
 
     def _push(self, value: float) -> None:
         self._manager.zone_priorities[self._zone_name] = int(value)
+
+
+class LockoutNumber(_ManagerNumber):
+    """Outdoor temperature past which this direction never runs.
+
+    Cooling: no cooling below it (a compressor without a low-ambient kit
+    ices its coil). Heating: no heating above it. Set it to the end of
+    the range to effectively turn it off.
+    """
+
+    _attr_native_step = 0.5
+
+    def __init__(self, manager: CoolingZoneManager, entry: ConfigEntry) -> None:
+        super().__init__(manager, entry)
+        self._attr_unique_id = f"{entry.entry_id}_lockout"
+        heating = manager.mode == MODE_HEATING
+        self._attr_name = "Heating lockout above" if heating else "Cooling lockout below"
+        self._attr_icon = (
+            "mdi:thermometer-chevron-up" if heating else "mdi:thermometer-chevron-down"
+        )
+        unit = manager.hass.config.units.temperature_unit
+        self._attr_native_unit_of_measurement = unit
+        if unit == UnitOfTemperature.CELSIUS:
+            self._attr_native_min_value = -20
+            self._attr_native_max_value = 55
+            default = DEFAULT_HEATING_LOCKOUT_C if heating else DEFAULT_COOLING_LOCKOUT_C
+        else:
+            self._attr_native_min_value = 0
+            self._attr_native_max_value = 130
+            default = DEFAULT_HEATING_LOCKOUT_F if heating else DEFAULT_COOLING_LOCKOUT_F
+        self._attr_native_value = default
+        self._push(default)
+
+    def _push(self, value: float) -> None:
+        self._manager.lockout_temp = float(value)
+
+
+class ChangeoverDelayNumber(_ManagerNumber):
+    """Minimum time the other direction must be off before this one runs.
+
+    Set in minutes. The interlock (never both at once) holds even at 0.
+    """
+
+    _attr_name = "Changeover delay"
+    _attr_icon = "mdi:swap-horizontal"
+    _attr_native_min_value = 0
+    _attr_native_max_value = 240
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+
+    def __init__(self, manager: CoolingZoneManager, entry: ConfigEntry) -> None:
+        super().__init__(manager, entry)
+        self._attr_unique_id = f"{entry.entry_id}_changeover_delay"
+        self._attr_native_value = DEFAULT_CHANGEOVER_MINUTES
+        self._push(DEFAULT_CHANGEOVER_MINUTES)
+
+    def _push(self, value: float) -> None:
+        self._manager.changeover_delay = int(value) * 60
+
+
+class ChangeoverBandNumber(_ManagerNumber):
+    """How far past setpoint an auto thermostat's room must swing before
+    the system changes over to this direction. 0 turns it off."""
+
+    _attr_name = "Changeover band"
+    _attr_icon = "mdi:arrow-expand-vertical"
+    _attr_native_min_value = 0
+    _attr_native_max_value = 10
+    _attr_native_step = 0.5
+
+    def __init__(self, manager: CoolingZoneManager, entry: ConfigEntry) -> None:
+        super().__init__(manager, entry)
+        self._attr_unique_id = f"{entry.entry_id}_changeover_band"
+        unit = manager.hass.config.units.temperature_unit
+        self._attr_native_unit_of_measurement = unit
+        default = (
+            DEFAULT_CHANGEOVER_BAND_C
+            if unit == UnitOfTemperature.CELSIUS
+            else DEFAULT_CHANGEOVER_BAND_F
+        )
+        self._attr_native_value = default
+        self._push(default)
+
+    def _push(self, value: float) -> None:
+        self._manager.changeover_band = float(value)
 
 
 class ZoneThresholdNumber(_ManagerNumber):

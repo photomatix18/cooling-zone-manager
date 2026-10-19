@@ -3,6 +3,42 @@
 All notable changes to the HVAC Zone Manager integration (named Cooling Zone
 Manager before 2.0.0) are documented here.
 
+## 2.2.0 — 2026-10-19
+
+### Added — outdoor lockout and heat/cool changeover
+
+Prompted by a night with the thermostats in auto (single 70 °F setpoint,
+±0.3 °F tolerance): the furnace's overshoot tipped every room into a cooling
+call, the AC overcooled it back into a heating call, and the house swapped
+directions about once an hour until morning — with no gap between furnace off
+and AC on, at 54–58 °F outside.
+
+- **Cooling lockout below** (cooling entry, default 60 °F / 15.5 °C) and
+  **Heating lockout above** (heating entry, default 65 °F / 18.5 °C), when the
+  entry has the outdoor sensor. Crossing the line winds running zones down;
+  1 °F of hysteresis on the way back. New zone status **`lockout`**.
+- **Interlock**: a cooling and a heating entry never run at the same time.
+- **Changeover delay** (default 30 min): a direction may not start until the
+  other has been off this long.
+- **Changeover band** (default 2 °F / 1 °C): after the delay, a zone whose
+  thermostat is in `auto`/`heat_cool` only changes the system over once its
+  room is this far past setpoint. Explicit heat/cool modes skip it.
+- New zone status **`changeover`**, countdown type `changeover`, and Active
+  zones attributes `lockout_temp`, `locked_out`, `changeover`,
+  `changeover_until`, `changeover_delay_seconds`, `changeover_band`.
+- A cooling zone without a thermostat borrows the same-named heating zone's.
+- `tools/sim.py` scenarios U–Z, including a replay of the night above.
+
+### Changed
+
+- A heating entry with an outdoor sensor no longer gets the *Allow N zones
+  below* capacity thresholds (cooling-only concept); it gets the lockout.
+- Thermostats in dual_smart_thermostat's single-setpoint **`auto`** mode now
+  qualify as heating companions (before, only `heat`/`heat_cool` did, so in
+  auto the floor never found a companion).
+
+All 21 earlier simulation scenarios pass unchanged.
+
 ## 2.1.0 — 2026-10-16
 
 ### Added — heating mode

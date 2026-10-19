@@ -102,6 +102,8 @@ def _async_cleanup_orphans(
         f"{entry.entry_id}_max_run",
         f"{entry.entry_id}_cooldown",
         f"{entry.entry_id}_cooldown_until",
+        f"{entry.entry_id}_changeover_delay",
+        f"{entry.entry_id}_changeover_band",
     }
     for zone in manager.zones:
         expected.add(f"{entry.entry_id}_zone_{zone.name}_status")
@@ -109,8 +111,10 @@ def _async_cleanup_orphans(
         expected.add(f"{entry.entry_id}_zone_{zone.name}_countdown")
         expected.add(f"{entry.entry_id}_priority_{zone.name}")
     if manager.temp_entity:
-        for tier in range(2, len(manager.zones) + 1):
-            expected.add(f"{entry.entry_id}_threshold_{tier}")
+        expected.add(f"{entry.entry_id}_lockout")
+        if manager.mode != MODE_HEATING:
+            for tier in range(2, len(manager.zones) + 1):
+                expected.add(f"{entry.entry_id}_threshold_{tier}")
     if manager.mode == MODE_HEATING:
         expected.add(f"{entry.entry_id}_min_zones")
         expected.add(f"{entry.entry_id}_companion_margin")

@@ -54,6 +54,28 @@ DEFAULT_PRIORITY = 2
 # cannot hard-cut a cycle that just started.
 PRIORITY_MIN_RUN = 300
 
+# Outdoor lockout defaults: cooling never runs below the cooling value,
+# heating never above the heating value. TEMP_HYSTERESIS applies on the
+# way back out, so a reading hovering at the line does not flap.
+DEFAULT_COOLING_LOCKOUT_F = 60.0
+DEFAULT_COOLING_LOCKOUT_C = 15.5
+DEFAULT_HEATING_LOCKOUT_F = 65.0
+DEFAULT_HEATING_LOCKOUT_C = 18.5
+
+# Changeover between the cooling and heating entries. After one direction
+# has run, the other may not start until the first has been off this long
+# (minutes); 0 leaves only the interlock (never both at once).
+DEFAULT_CHANGEOVER_MINUTES = 30
+# ...and, for a thermostat in auto / heat_cool, not until its room is this
+# far past setpoint in the new direction — the latch that keeps an auto
+# thermostat from flipping on a fraction of a degree of overshoot.
+DEFAULT_CHANGEOVER_BAND_F = 2.0
+DEFAULT_CHANGEOVER_BAND_C = 1.0
+# How often (seconds) a zone held by the changeover band re-checks its
+# room. The room temperature lives on a thermostat this entry may not
+# subscribe to, so it polls while held.
+CHANGEOVER_BAND_RECHECK = 60
+
 # How long (seconds) after startup to wait for the outdoor sensor's
 # first reading. Until it arrives (or this passes), capacity changes are
 # frozen: running zones keep running, no extra zones start, nothing is

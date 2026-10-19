@@ -34,7 +34,7 @@ One device ("HVAC Zone Manager") showing the installed **version**, with these e
 | `number.hvac_zone_manager_<zone>_priority` | One per zone: the zone's priority, `1`–`3` (see **Zone priorities** below) |
 | `sensor.hvac_zone_manager_active_zones` | How many zones are cooling now; attributes show active / requesting / winding-down / waiting / preempted zones, the round-robin order, the cooldown, a per-zone detail map, and the version |
 | `sensor.hvac_zone_manager_cooldown_ends` | When the compressor cooldown ends — a live countdown while it runs, `unknown` otherwise |
-| `sensor.hvac_zone_manager_<zone>_status` | One per zone: `cooling`, `winding_down`, `cooldown`, `waiting`, or `idle`, with the request state, actual switch state, cycle runtime, and every pending countdown as attributes |
+| `sensor.hvac_zone_manager_<zone>_status` | One per zone: `cooling` (or `heating`), `companion`, `winding_down`, `lockout`, `changeover`, `cooldown`, `waiting`, or `idle`, with the request state, actual switch state, cycle runtime, and every pending countdown as attributes |
 | `sensor.hvac_zone_manager_<zone>_countdown` | One per zone: the zone's next scheduled transition as a live countdown, with a `countdown_type` attribute naming it (see **Watching it work**) |
 | `sensor.hvac_zone_manager_<zone>_runtime` | One per zone: how long the **current run** has been cooling. Resets when the zone starts; holds the last run's duration while off (`running` attribute says which) |
 | `sensor.hvac_zone_manager_total_runtime` | Cooling time across all zones for the **current session**. Resets when a zone requests again after everything was satisfied |
@@ -133,9 +133,28 @@ A furnace usually *can* carry every zone at once, so heating rarely needs the ce
 - **If no zone qualifies, the requester heats alone** and the Active zones sensor shows `short_of_min_zones: true`. The floor never stops a room from heating.
 - After a restart, a zone that is on without a request is adopted back as a companion rather than switched off.
 
-Leave the outdoor temperature sensor empty on a heating entry — its thresholds only make sense for cooling. Max zones, max run time, priorities and the overlap work exactly as for cooling; with Max zones at the zone count, the ceiling never bites.
+Give the heating entry the outdoor temperature sensor too if you want its **lockout** (below); a heating entry never gets the capacity thresholds, which only make sense for cooling. Max zones, max run time, priorities and the overlap work exactly as for cooling; with Max zones at the zone count, the ceiling never bites.
 
-> Cooling and heating entries don't coordinate with each other. If one room's thermostat is on heat while another's is on cool, each entry will happily run its own. Keep the thermostats in the same mode, or interlock them yourself.
+## Outdoor lockout and changeover (2.2.0)
+
+These stop the failure that prompted them: thermostats in **auto** with a single setpoint (tolerance ±0.3 °F) flipped the house from heat to cool on the furnace's own overshoot, back and forth all night, with no gap between the furnace stopping and the AC starting — at 55 °F outside.
+
+**Outdoor lockout** — needs the outdoor temperature sensor on the entry.
+
+| Number | Meaning | Default |
+|---|---|---|
+| **Cooling lockout below** (cooling entry) | No cooling while it is colder than this outside. Most AC condensers without a low-ambient kit ice their coil below roughly 55–60 °F | 60 °F / 15.5 °C |
+| **Heating lockout above** (heating entry) | No heating while it is warmer than this outside | 65 °F / 18.5 °C |
+
+Crossing the line winds every running zone down through the normal overlap; zones then show **`lockout`**. It clears a full degree back on the other side, so a reading hovering at the line doesn't flap. An unreadable sensor keeps the last state; before the first reading nothing is locked out. Set the number to the end of its range to turn it off.
+
+**Changeover** — between a cooling and a heating entry over the same rooms. They find each other automatically; nothing to configure but the numbers, which each entry has its own copy of (they govern changing over *to* that entry's direction):
+
+1. **Interlock** — neither entry starts a zone while the other has one on. Always on.
+2. **Changeover delay** (default `30` min) — after the other direction ran, this one waits until it has been off this long.
+3. **Changeover band** (default 2 °F / 1 °C, `0` = off) — then, for a thermostat in **auto** or **heat_cool**, a zone only changes the system over once its room is this far past setpoint in the new direction. After cooling, an auto thermostat at 70 °F keeps cycling on its own ±0.3 °F; heat only comes back once the room reaches 68 °F. A thermostat set to an explicit heat or cool mode skips the band — someone chose the direction — but still gets the delay.
+
+Once a zone starts, its direction is the latest to have run and the gate is gone; cycling within one direction is never affected. Held zones show **`changeover`**, the countdown sensor shows the delay (`countdown_type: changeover`), and the Active zones sensor carries `changeover` (`interlock` / `delay` / `band`) and `changeover_until`. The band reads each room's thermostat; a cooling zone without one borrows the thermostat of the heating zone with the **same name**.
 
 ## Installation
 
@@ -206,6 +225,7 @@ HACS installs integrations from GitHub repositories, so this repo needs to live 
   | `countdown_type` | The zone is… |
   |---|---|
   | `switching_off` | winding down; this is when its switch turns off |
+  | `changeover` | waiting out the changeover delay after the other direction ran |
   | `compressor_cooldown` | waiting for the global cooldown to end |
   | `resting` | waiting out its own rest gate (see **Max zone run time**) |
   | `priority_eviction` | running, but a higher-priority zone takes this slot when the 5-minute compressor guard clears |
